@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-tests/
+release/
+*.tar.gz
+*.sha256
+.env
+.env.*
+*.sqlite
+*.sqlite-*
+*.pem
+*.key
+*.log
+.DS_Store
+coverage/
+private/
