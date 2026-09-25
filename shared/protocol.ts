@@ -1,4 +1,5 @@
 import type { CodexSelection } from './codex-settings.js';
+import type { ClaudeSelection } from './runtime.js';
 export const PROTOCOL_VERSION = 1;
 export type AgentKind = "hermes" | "openclaw" | "nanobot" | "codex" | "claude" | "custom";
 export const isCodingAgent = (kind: AgentKind | undefined) => kind === 'codex' || kind === 'claude';
@@ -21,6 +22,7 @@ export interface Conversation {
   projectId?: string;
   /** Initial Codex selection only; confirmed current settings come from runtime reports. */
   codexSettings?: CodexSelection;
+  claudeSettings?: ClaudeSelection;
   title: string;
   archived: boolean;
   createdAt: string;

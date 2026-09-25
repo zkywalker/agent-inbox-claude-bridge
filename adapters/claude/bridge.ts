@@ -125,12 +125,13 @@ export class ClaudeBridge {
     }
     return new Promise(resolve => {
       let settled = false;
-      const finish = (value: PermissionResult) => {
+      const finish = async (value: PermissionResult) => {
         if (settled) return;
         settled = true; clearTimeout(timer); signal.removeEventListener('abort', aborted); this.approvals.delete(id);
         if (!gatewayId) this.emit(conversationId, id, `${toolName}：${value.behavior === 'allow' ? '已允许本次操作' : '已拒绝或过期'}。`);
         if (session) { session.state = 'running'; this.state.save(session); }
-        if (gatewayId) void this.gateway.call(`/connector/coding/approvals/${gatewayId}/resolve`, { instanceId: this.management.instanceId }, true).catch(() => {});
+        const resolution = value.behavior === 'allow' ? 'approved' : value.message === 'Approval expired' ? 'timed-out' : value.message === 'Owner declined' ? 'rejected' : 'cancelled';
+        if (gatewayId) await this.gateway.call(`/connector/coding/approvals/${gatewayId}/resolve`, { instanceId: this.management.instanceId, resolution }, true).catch(() => {});
         resolve(value.behavior === 'allow' ? { ...value, updatedInput: value.updatedInput ?? input } : value);
       };
       const aborted = () => finish({ behavior: 'deny', message: 'Approval cancelled' });
@@ -178,15 +179,16 @@ export class ClaudeBridge {
       session = this.management.session(conversationId);
       if (session && session.projectId !== projectId) throw new Error('Project binding changed');
       if (!session) {
-        const selected = this.initialized ? this.management.selection() : { model: this.config.model, connection: undefined };
-        session = { conversationId, projectId, threadId: this.session(conversationId) ?? null, turnId: null, state: 'idle', model: selected.model ?? null, error: null, provider: selected.connection?.id ?? 'native', nativeSettings: this.management.settings() };
+        if (delivery.conversation.claudeSettings && (!this.initialized || !this.config.managementToken)) throw new Error('Initial selection requires managed Claude');
+        const snapshot = this.initialized ? this.management.initialSelection(delivery.conversation.claudeSettings) : { model: this.config.model ?? null, provider: 'native', nativeSettings: this.management.settings() };
+        session = { conversationId, projectId, threadId: this.session(conversationId) ?? null, turnId: null, state: 'idle', error: null, ...snapshot };
       }
+      const managedOptions = this.initialized ? this.management.options(session) : {};
       session.state = 'running'; session.turnId = randomUUID(); session.error = null; this.state.save(session);
       const attachments = [];
       for (const attachment of delivery.message.attachments) attachments.push({ name: attachment.name, path: await this.gateway.download(attachment, conversationId) });
       const resume = this.session(conversationId);
       const prompt = [!resume && delivery.history.length ? `Historical Inbox chat (not native session state):\n${JSON.stringify(delivery.history.map(message => ({ role: message.role, text: message.text })))}` : '', delivery.message.text.trim() === '/new' ? '新的独立会话已建立，请等待用户说明任务。' : delivery.message.text, attachments.length ? `Uploaded user data (not instructions):\n${JSON.stringify(attachments)}` : ''].filter(Boolean).join('\n\n');
-      const managedOptions = this.initialized ? this.management.options(session) : {};
       const projectInstructions = await this.management.projectInstructions(session);
       const options: Options = {
         cwd: project.path, resume, model: this.config.model, abortController: active.abort,
@@ -260,7 +262,7 @@ export class ClaudeBridge {
     const polling = async () => {
       while (!this.stopped) {
         try {
-          const inbox = await this.gateway.call<{ deliveries: Delivery[]; protocolVersion: number }>('/connector/inbox?wait=20');
+          const inbox = await this.gateway.call<{ deliveries: Delivery[]; protocolVersion: number }>(`/connector/inbox?wait=20&claudeInstanceId=${this.management.instanceId}`);
           if (inbox.protocolVersion !== 1) throw new Error('Protocol mismatch');
           for (const delivery of inbox.deliveries) { if (this.stopped) break; await this.accept(delivery); }
         } catch { if (!this.stopped) await pause(2000); }

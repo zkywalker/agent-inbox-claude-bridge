@@ -3,7 +3,8 @@ import type { BridgeUpdatePlan } from './bridge-update.js';
 import type { BridgePlatform } from './bridge-release.js';
 export type ModelApiMode = 'chat_completions' | 'responses' | 'anthropic_messages';
 
-export interface ClaudeSettings { permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'dontAsk'; effort?: 'low' | 'medium' | 'high' | 'max' }
+export interface ClaudeSettings { permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'dontAsk' | 'bypassPermissions'; effort?: 'low' | 'medium' | 'high' | 'max' }
+export type ClaudeSelection = ClaudeSettings & { model?: string; provider?: string };
 
 export interface ModelConnection {
   id: string;
@@ -94,10 +95,12 @@ export interface RuntimeReport {
   claude?: { settings: ClaudeSettings; source: 'configuration' | 'runtime'; conversion: 'native' | 'chat_completions' | 'responses' };
   claudeUpdate?: CodexUpdateInfo;
   codexInstanceId?: string;
+  claudeInstanceId?: string;
+  maintenance?: boolean;
   conversationId: string | null;
   runtimeVersion: string | null;
   bridgeVersion?: string | null;
-  capabilities: { inspect: boolean; switchModel: boolean; syncConnections: boolean; readFiles: boolean; reasoning?: boolean; manageProjects?: boolean; updateSettings?: boolean; manageSkills?: boolean; manageMcp?: boolean };
+  capabilities: { inspect: boolean; switchModel: boolean; syncConnections: boolean; readFiles: boolean; reasoning?: boolean; manageProjects?: boolean; updateSettings?: boolean; manageSkills?: boolean; manageMcp?: boolean; initialSelection?: boolean; defaultsWhileBusy?: boolean; claudeBypassPermissions?: boolean };
   codex?: CodexSettingsReport;
   codexUpdate?: CodexUpdateInfo;
   bridgeUpdate?: BridgeUpdateInfo;

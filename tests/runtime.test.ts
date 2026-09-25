@@ -24,4 +24,18 @@ test('direct Messages source remains local and never starts conversion listener'
   assert.equal(options.env?.INBOX_CLAUDE_CODEX_PROVIDER_TOKEN, undefined);
   assert.equal(bridge.management.proxy.origin, '');
   assert.ok(!JSON.stringify(config).includes('fixture-key-only'));
+  assert.equal(options.permissionMode, 'default');
+  assert.equal(options.allowDangerouslySkipPermissions, false);
+  assert.equal(bridge.management.report(null).capabilities.claudeBypassPermissions, true);
+  const session = { conversationId: 'fixture', projectId: 'default', threadId: null, turnId: null, state: 'idle' as const, model: config.model!, provider: 'local', error: null };
+  const trusted = bridge.management.options({ ...session, nativeSettings: { permissionMode: 'bypassPermissions' } });
+  assert.equal(trusted.permissionMode, 'bypassPermissions');
+  assert.equal(trusted.allowDangerouslySkipPermissions, true);
+  for (const permissionMode of ['default', 'acceptEdits', 'plan', 'dontAsk'] as const) {
+    assert.equal(bridge.management.options({ ...session, nativeSettings: { permissionMode } }).allowDangerouslySkipPermissions, false);
+  }
+  state.saveTool('claude:default-settings', { permissionMode: 'bypassPermissions' });
+  assert.equal(bridge.management.initialSelection().nativeSettings.permissionMode, 'bypassPermissions');
+  assert.equal(bridge.management.initialSelection({ permissionMode: 'default' }).nativeSettings.permissionMode, 'default');
+  assert.equal(bridge.management.options({ ...session, nativeSettings: { permissionMode: 'default' } }).allowDangerouslySkipPermissions, false);
 });

@@ -26,7 +26,7 @@ export const codexOptionKeys = ['approvalPolicy', 'approvalsReviewer', 'sandboxM
 export function selectCodexOptions(value: CodexSelection): CodexOptions {
   return Object.fromEntries(codexOptionKeys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
 }
-export function canonicalSelection(value: CodexSelection | undefined): string | null {
+export function canonicalSelection(value: object | undefined): string | null {
   return value && Object.keys(value).length ? JSON.stringify(Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => a.localeCompare(b)))) : null;
 }
 export function codexOptionsAllowed(value: CodexOptions, allowed: CodexSettingsReport['allowed']): boolean {

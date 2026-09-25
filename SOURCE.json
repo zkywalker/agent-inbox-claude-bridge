@@ -1,14 +1,16 @@
 {
   "repository": "zkywalker/agent-inbox",
-  "adaptations": ["shared/bridge-release.ts uses the independent Claude repository and signature domain; listed file hashes record the upstream export before that adaptation"],
+  "adaptations": [
+    "shared/bridge-release.ts uses the independent Claude repository and signature domain; listed file hashes record the upstream export before that adaptation"
+  ],
   "baseCommit": "905f7c0bc8199192b7661c72e44d0b5bf4bd1386",
-  "note": "Selected working-tree files include approved Claude implementation not yet committed in the gateway repository. Per-file hashes identify the exported bytes.",
+  "note": "Selected working-tree files include approved Claude configuration parity, explicit approval outcomes and opt-in full trust. Gateway changes are not yet committed; per-file hashes identify exported bytes.",
   "files": {
-    "adapters/claude/bridge.ts": "46bc4de06cb584e9655dbdf2c1d65a591adffc5b9e9b8ed7fe71e61d2a43fd01",
+    "adapters/claude/bridge.ts": "3327554b8805177abc98202924f5ff8c2f730d6af7a5914ea5e44dae024f62b0",
     "adapters/claude/config.ts": "c4b321bffc8e34eccfeacad9cd05e6dfc6e1351e1b807319cf3c289531e8fdac",
     "adapters/claude/codex-provider.ts": "5e30f9fbdc434f79e93342daadfcb445a3c247793018d333c0dc5f5e2aca664a",
     "adapters/claude/main.ts": "a5421390db918aa1e98054f5b3035e2a58b8c1283144c980cc155b1bcec82a81",
-    "adapters/claude/management.ts": "73e3c253e2c8b4f9e483df88b090396bb9d640cc4c90a52873d8c1e0fa97992b",
+    "adapters/claude/management.ts": "17faa8db5e5c491ac07b8153339a37ffeb7658d62c917850d7c6ad6751d3581a",
     "adapters/claude/messages-proxy.ts": "c687c64e76a9489d8b73bf3bbfbd8f79af1394debf9d977193867ff91777d621",
     "adapters/claude/runtime.ts": "3a87c5c06a15d1ddfbed52b292ab55fadc2715e34debe399439a7b7be656a251",
     "adapters/codex/gateway.ts": "c389549941344716db16261460c24c29a79aaa767ab9be076b10259097d42ee2",
@@ -16,10 +18,10 @@
     "adapters/codex/projects.ts": "f7d31c099508a4a3846dd60688bd9bc0876a4b1d8ae22f1729d5b5b8333db9c7",
     "adapters/codex/files.ts": "24289d57501243f5ae1506021bfbf86fc8b421a85a1e001ddc1574d3a6986e76",
     "adapters/codex/file-references.ts": "a935feff07a13360732df5ceba48478f0b02fbb2fdfbebb135c02877b6833700",
-    "shared/protocol.ts": "35f12e62896a7b97653af305bfc811217389b6884b17d7d9992db13e9137c772",
-    "shared/runtime.ts": "969831aefa9b836b79fd8e38a0ef788957d935a3fb2c102449fdaba0e100b01c",
-    "shared/codex.ts": "3f08619ae586c64f5d7fadd4b4910f1f97916f836c5b32b3ee9a82aec0464f9f",
-    "shared/codex-settings.ts": "e53373ed0a04d93db8b4db25aca4b796f09a02baa3630dd9203a8e90347e1671",
+    "shared/protocol.ts": "b442ce58586c8d735611d48b1581f3d81061f0870ef9f34579f730953bfbfbbf",
+    "shared/runtime.ts": "2d4d99c26ed5afddb2b0f73efab267fde2021861246e1ecbca44a8d55a8a72cc",
+    "shared/codex.ts": "7c26cda432600362f90650ba198a2175d80c7cae78734231202876e637226daf",
+    "shared/codex-settings.ts": "693929cd5c1a1112fca62fc2d07df1d5c34ea00d81392846685afd0802a73c05",
     "shared/file-references.ts": "c13f2bb3d3c6fe9d0e8dddec0fe7badb5eb8005aa6759954609c13a92cefb303",
     "shared/bridge-update.ts": "c2474a4faa6455ff707a8b3ab868bdf27905708dd28bac2ac1ac87eadacc812e",
     "shared/bridge-release.ts": "ba6a5b8d8cb062aa51fe57358f419850495ab101a6c4ffd4ada7f1d34ca786e6"

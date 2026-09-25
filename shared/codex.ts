@@ -13,6 +13,7 @@ export interface CodexSession {
 export interface CodexQuestion {
   id: string; question: string; options: { label: string; description: string }[]; isSecret: boolean;
 }
+export type CodexApprovalResolution = 'approved' | 'rejected' | 'timed-out' | 'cancelled';
 export interface CodexApproval {
   scope?: 'once' | 'turn';
   id: string; conversationId: string; threadId: string; turnId: string;

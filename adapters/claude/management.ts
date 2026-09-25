@@ -4,7 +4,7 @@ import { cp, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'no
 import { join, relative, isAbsolute, sep } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { ClaudeSettings, CodexUpdateInfo, RuntimeReport, RuntimeRequest } from '../../shared/runtime.js';
+import type { ClaudeSelection, ClaudeSettings, CodexUpdateInfo, RuntimeReport, RuntimeRequest } from '../../shared/runtime.js';
 import type { CodexAction, CodexSession } from '../../shared/codex.js';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { Gateway } from '../codex/gateway.js';
@@ -17,6 +17,12 @@ import { verifyClaudeBinary } from './runtime.js';
 
 interface Host { busy: (conversationId?: string) => boolean; control: (action: CodexAction) => Promise<void> }
 const unknownUsage: RuntimeReport['usage'] = { contextTokens: null, contextLimit: null, inputTokens: null, outputTokens: null, cacheReadTokens: null, contextSource: 'unknown', totalsSource: 'unknown' };
+// These are configurable adapter parameters, not a probe of upstream model support.
+const reasoningEfforts = [
+  { id: 'low', description: '低（配置值）' }, { id: 'medium', description: '中（配置值）' },
+  { id: 'high', description: '高（配置值）' }, { id: 'max', description: '最高（仅原生 Messages 配置）' },
+];
+const allowedEfforts = (connection?: ProxyConnection) => reasoningEfforts.filter(effort => effort.id !== 'max' || !connection || connection.apiMode === 'anthropic_messages');
 export class ClaudeManagement {
   readonly instanceId = randomUUID();
   readonly projects: Projects;
@@ -56,17 +62,19 @@ export class ClaudeManagement {
     await this.scanSkills(); await this.prepareSkills();
     this.connections = this.localConnection();
     await this.configureConnections(this.connections);
-    if (this.config.managementToken) {
-      await this.register();
-      for (const session of this.state.sessions()) {
-        if (this.projectConfig.projects.some(project => project.id === session.projectId)) {
-          session.state = ['running', 'waiting'].includes(session.state) ? 'unknown' : session.state; session.turnId = null;
-          this.state.save(session); await this.publishSession(session);
-        }
-      }
-      await this.syncConnections();
-      await this.gateway.call('/connector/runtime/report', this.report(null), true);
-    } else this.credentialsReady = true;
+    if (this.config.managementToken) { await this.register(); await this.syncConnections(); }
+    else this.credentialsReady = true;
+    const defaults = this.defaultModel(), settings = this.settings();
+    for (const session of this.state.sessions()) {
+      // Freeze legacy inheritance once; a complete native null model stays SDK-default, not future bridge defaults.
+      if (!session.nativeSettings || !session.provider || session.model === undefined || session.model === '' || (session.model === null && session.provider !== 'native')) session.model ||= defaults.model ?? null;
+      session.provider ||= defaults.provider;
+      session.nativeSettings ??= { ...settings };
+      session.state = ['running', 'waiting'].includes(session.state) ? 'unknown' : session.state; session.turnId = null;
+      this.state.save(session);
+      if (this.projectConfig.projects.some(project => project.id === session.projectId)) await this.publishSession(session);
+    }
+    if (this.config.managementToken) await this.gateway.call('/connector/runtime/report', this.report(null), true);
     this.ready = true;
   }
   private async register() {
@@ -85,27 +93,52 @@ export class ClaudeManagement {
     return project;
   }
   choices() {
-    const choices = this.connections.flatMap(connection => connection.models.map(model => ({ id: stableKey(`${connection.id}:${model}`), model, provider: connection.id, providerLabel: connection.name })));
-    if (!choices.length && !this.config.provider && this.config.model) choices.push({ id: stableKey(`native:${this.config.model}`), model: this.config.model, provider: 'native', providerLabel: 'Claude 原生认证' });
+    const choices = this.connections.flatMap(connection => connection.models.map(model => ({ id: stableKey(`${connection.id}:${model}`), model, provider: connection.id, providerLabel: connection.name, reasoningEfforts: allowedEfforts(connection) })));
+    if (!this.config.provider && this.config.model) choices.push({ id: stableKey(`native:${this.config.model}`), model: this.config.model, provider: 'native', providerLabel: 'Claude 原生认证', reasoningEfforts: allowedEfforts() });
     return choices;
   }
-  selection(session?: Session) {
+  private defaultModel(): { model?: string; provider: string } {
     const defaults = this.state.tool('claude:default-model') as { model: string; provider: string } | undefined;
-    if (!session?.provider && defaults) {
-      const connection = this.connections.find(item => item.id === defaults.provider && item.models.includes(defaults.model));
-      if (defaults.provider !== 'native' && !connection) throw new Error('Default connection was removed; select another model explicitly');
-      return { model: defaults.model, connection };
-    }
-    if (session?.provider && session.provider !== 'native') {
-      const selected = this.connections.find(connection => connection.id === session.provider && connection.models.includes(session.model ?? ''));
-      if (!selected) throw new Error('Selected connection was removed; select another model explicitly');
-      return { model: session.model!, connection: selected };
-    }
-    if (session?.provider === 'native') return { model: session.model ?? this.config.model, connection: undefined };
     const first = this.choices()[0];
-    return { model: first?.model ?? this.config.model, connection: this.connections.find(connection => connection.id === first?.provider) };
+    return defaults ?? { model: first?.model ?? this.config.model, provider: first?.provider ?? 'native' };
   }
-  settings(session?: Session): ClaudeSettings { return session?.nativeSettings ?? this.state.tool('claude:default-settings') ?? { permissionMode: 'default' }; }
+  selection(session?: Pick<Session, 'model' | 'provider'>) {
+    const selected = session ?? this.defaultModel();
+    if (selected.provider === 'native') {
+      if (this.config.provider || selected.model != null && selected.model !== this.config.model) throw new Error('unsupported');
+      return { model: selected.model ?? undefined, connection: undefined };
+    }
+    const connection = this.connections.find(connection => connection.id === selected.provider && connection.models.includes(selected.model ?? ''));
+    if (!connection) throw new Error('unsupported');
+    return { model: selected.model!, connection };
+  }
+  settings(session?: Session): ClaudeSettings {
+    return { ...(session ? session.nativeSettings ?? { permissionMode: 'default' } : this.state.tool('claude:default-settings') ?? { permissionMode: 'default' }) };
+  }
+  private validateSettings(settings: { permissionMode?: unknown; effort?: unknown }, connection?: ProxyConnection): ClaudeSettings {
+    if (settings.permissionMode !== undefined && !['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions'].includes(settings.permissionMode as string)
+      || settings.effort !== undefined && !allowedEfforts(connection).some(effort => effort.id === settings.effort)) throw new Error('unsupported');
+    return settings as ClaudeSettings;
+  }
+  initialSelection(initial: ClaudeSelection = {}) {
+    const { model, provider, ...overrides } = initial;
+    if ((model !== undefined) !== (provider !== undefined) || model !== undefined && (!model || !provider)) throw new Error('unsupported');
+    const selected = model !== undefined ? this.selection({ model, provider: provider! }) : this.selection();
+    const nativeSettings = this.validateSettings({ ...this.settings(), ...overrides }, selected.connection);
+    return { model: selected.model ?? null, provider: selected.connection?.id ?? 'native', nativeSettings };
+  }
+  private busy(conversationId?: string) {
+    const sessions = conversationId ? [this.session(conversationId)].filter((session): session is Session => !!session) : this.state.sessions();
+    return this.host.busy(conversationId) || sessions.some(session => ['running', 'waiting', 'unknown'].includes(session.state));
+  }
+  private saveDefaults(model: { model: string; provider: string }, settings: ClaudeSettings) {
+    this.state.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.state.saveTool('claude:default-model', model);
+      this.state.saveTool('claude:default-settings', settings);
+      this.state.db.exec('COMMIT');
+    } catch (error) { this.state.db.exec('ROLLBACK'); throw error; }
+  }
   redact(text: string) {
     for (const secret of [this.config.token, this.config.managementToken, this.config.accessClientSecret, this.proxy.token, ...this.connections.map(connection => connection.apiKey)]) if (secret) text = text.split(secret).join('[redacted]');
     return text;
@@ -113,6 +146,7 @@ export class ClaudeManagement {
   options(session: Session): Partial<Options> {
     if (!this.credentialsReady || this.maintenance) throw new Error('Management not ready');
     const { model, connection } = this.selection(session);
+    const settings = this.validateSettings(this.settings(session), connection);
     const env = providerEnvironment(this.config);
     if (connection) {
       for (const [key, value] of Object.entries(env)) if (value === connection.apiKey || key === 'OPENAI_API_KEY' || key === this.config.provider?.tokenEnv) delete env[key];
@@ -125,8 +159,7 @@ export class ClaudeManagement {
       env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
     }
     const disabled: string[] = this.state.tool('claude:disabled-mcp') ?? [];
-    const settings = this.settings(session);
-    return { model, env, permissionMode: settings.permissionMode ?? 'default', effort: settings.effort,
+    return { model, env, permissionMode: settings.permissionMode ?? 'default', allowDangerouslySkipPermissions: settings.permissionMode === 'bypassPermissions', effort: settings.effort,
       ...(connection?.apiMode !== 'anthropic_messages' && connection ? { thinking: { type: 'disabled' } } : {}),
       mcpServers: Object.fromEntries(Object.entries(this.config.mcpServers).filter(([name]) => !disabled.includes(name))),
       plugins: this.pluginPath ? [{ type: 'local', path: this.pluginPath }] : [],
@@ -134,18 +167,20 @@ export class ClaudeManagement {
   }
   report(conversationId: string | null): RuntimeReport {
     const session = conversationId ? this.session(conversationId) : undefined;
-    let selection: ReturnType<ClaudeManagement['selection']> = { model: session?.model ?? undefined, connection: undefined };
+    const configured = session ?? this.defaultModel(), settings = this.settings(session);
+    let selection: ReturnType<ClaudeManagement['selection']> = { model: configured.model ?? undefined, connection: undefined };
     try { selection = this.selection(session); } catch {}
     const disabledSkills: string[] = this.state.tool('claude:disabled-skills') ?? [], disabledMcp: string[] = this.state.tool('claude:disabled-mcp') ?? [];
-    const provider = session?.provider ?? selection.connection?.id ?? 'native';
+    const provider = configured.provider;
     return {
-      conversationId, runtimeVersion: this.version === 'unknown' ? null : this.version,
-      capabilities: { inspect: true, switchModel: true, syncConnections: true, readFiles: true, manageProjects: this.projects.enabled, manageSkills: true, manageMcp: true },
-      claude: { settings: this.settings(session), source: 'configuration', conversion: selection.connection?.apiMode === 'chat_completions' || selection.connection?.apiMode === 'responses' ? selection.connection.apiMode : 'native' },
+      conversationId, claudeInstanceId: this.instanceId, maintenance: this.maintenance, runtimeVersion: this.version === 'unknown' ? null : this.version,
+      capabilities: { inspect: true, switchModel: true, syncConnections: true, readFiles: true, reasoning: true, initialSelection: true, defaultsWhileBusy: true, claudeBypassPermissions: true, updateSettings: true, manageProjects: this.projects.enabled, manageSkills: true, manageMcp: true },
+      reasoning: { effort: settings.effort ?? null },
+      claude: { settings, source: 'configuration', conversion: selection.connection?.apiMode === 'chat_completions' || selection.connection?.apiMode === 'responses' ? selection.connection.apiMode : 'native' },
       claudeUpdate: this.update,
       model: selection.model ? { model: selection.model, provider, providerLabel: selection.connection?.name ?? 'Claude 原生认证', scope: conversationId ? 'conversation' : 'instance', source: 'configuration' } : null,
       lastUsedModel: session?.lastUsedModel ? { model: session.lastUsedModel, provider: session.provider } : null,
-      models: this.choices(), busy: this.host.busy(conversationId ?? undefined) || this.maintenance,
+      models: this.choices(), busy: this.maintenance || this.busy(conversationId ?? undefined) || (conversationId !== null && session?.state !== 'idle'),
       usage: session?.usage ?? unknownUsage,
       environment: { host: hostname(), project: session ? this.project(session).name : null, cwd: session ? this.project(session).path : '', source: this.host.busy(conversationId ?? undefined) && session ? 'runtime' : 'defaults', sandbox: null, writableRoots: [], networkAccess: null, approvalPolicy: this.settings(session).permissionMode ?? 'default', approvalsReviewer: 'user' },
       inventory: { scope: session ? 'project' : 'instance', observedAt: new Date().toISOString(), warnings: ['Skills/MCP 开关作用于此 bridge 的受管插件和服务器；配置在下一次原生回合加载，不修改主机其他 Claude 客户端。'] },
@@ -204,8 +239,10 @@ export class ClaudeManagement {
     this.pluginPath = this.skills.length ? root : undefined;
   }
   async syncConnections() {
-    if (this.host.busy() || this.maintenance) return;
+    if (this.host.busy() || (this.ready && this.busy()) || this.maintenance || this.pendingOperation) return;
     const desired = await this.gateway.call('/connector/runtime/connections?after=' + this.revision, undefined, true);
+    // The network wait may have admitted a turn or another maintenance owner.
+    if (this.host.busy() || (this.ready && this.busy()) || this.maintenance || this.pendingOperation) return;
     if (desired.connections === null) { this.credentialsReady = true; return; }
     this.maintenance = true;
     try {
@@ -234,19 +271,35 @@ export class ClaudeManagement {
       await this.gateway.call(`/connector/runtime/requests/${request.id}/result`, prior === 'processing' ? { ok: false, error: 'restarted' } : prior, true); return;
     }
     this.state.saveTool(`claude:operation:${request.id}`, 'processing');
-    let result: RuntimeRequest['result'] = null;
+    let result: RuntimeRequest['result'] = null, ownsMaintenance = false;
+    const releaseMaintenance = () => {
+      if (ownsMaintenance) { this.maintenance = this.update.status === 'uncertain'; ownsMaintenance = false; }
+    };
     try {
       const session = request.conversationId ? this.session(request.conversationId) : undefined;
-      if (request.kind !== 'inspect' && (this.host.busy() || this.maintenance)) throw new Error('busy');
-      this.maintenance = request.kind !== 'inspect';
+      const configuration = request.kind === 'switch-model' || request.kind === 'update-claude-settings';
+      if (request.kind !== 'inspect') {
+        if (this.maintenance || this.update.status === 'uncertain') throw new Error('busy');
+        if (configuration) {
+          if (request.conversationId !== null && !session) throw new Error('unsupported');
+          if (session && (session.state !== 'idle' || this.host.busy(session.conversationId))) throw new Error('busy');
+          // These synchronous writes affect one idle topic or future defaults only.
+        } else {
+          if (this.busy()) throw new Error('busy');
+          this.maintenance = true; ownsMaintenance = true;
+        }
+      }
       if (request.kind === 'switch-model') {
         const choice = this.choices().find(choice => choice.id === request.payload.choiceId);
-        if (!choice || request.conversationId && !session) throw new Error('unsupported');
-        if (session) { session.model = choice.model; session.provider = choice.provider; this.state.save(session); }
-        else this.state.saveTool('claude:default-model', { model: choice.model, provider: choice.provider });
+        if (!choice) throw new Error('unsupported');
+        const { connection } = this.selection(choice);
+        const settings = this.validateSettings({ ...this.settings(session), ...(request.payload.effort !== undefined ? { effort: request.payload.effort } : {}) }, connection);
+        if (session) { Object.assign(session, { model: choice.model, provider: choice.provider, nativeSettings: settings }); this.state.save(session); }
+        else this.saveDefaults({ model: choice.model, provider: choice.provider }, settings);
       } else if (request.kind === 'update-claude-settings') {
-        if (request.conversationId && !session || !request.payload.claudeSettings) throw new Error('unsupported');
-        const settings = { ...this.settings(session), ...request.payload.claudeSettings };
+        if (!request.payload.claudeSettings) throw new Error('unsupported');
+        const { connection } = this.selection(session);
+        const settings = this.validateSettings({ ...this.settings(session), ...request.payload.claudeSettings }, connection);
         if (session) { session.nativeSettings = settings; this.state.save(session); }
         else this.state.saveTool('claude:default-settings', settings);
       } else if (request.kind === 'browse-projects') result = { listing: await this.projects.browse(request.payload.directoryId) };
@@ -273,17 +326,17 @@ export class ClaudeManagement {
           this.saveUpdate({ ...this.update, status: from === to ? 'unchanged' : 'succeeded', toVersion: to, error: null }); await this.register();
         } catch { this.saveUpdate({ ...this.update, status: 'uncertain', error: 'update_interrupted' }); throw new Error('update_interrupted'); }
       } else if (request.kind !== 'inspect') throw new Error('unsupported');
-      this.maintenance = false;
+      releaseMaintenance();
       const outcome = { ok: true, result, report: this.report(request.conversationId) };
       this.state.saveTool(`claude:operation:${request.id}`, outcome);
       await this.gateway.call(`/connector/runtime/requests/${request.id}/result`, outcome, true);
-      if (session) await this.publishSession(session);
+      if (session) await this.publishSession(this.session(session.conversationId) ?? session);
     } catch (error) {
       const code = error instanceof Error && ['busy', 'unsupported', 'update_interrupted'].includes(error.message) ? error.message : 'failed';
       const outcome = { ok: false, error: code };
       if (this.state.tool(`claude:operation:${request.id}`) === 'processing') this.state.saveTool(`claude:operation:${request.id}`, outcome);
       await this.gateway.call(`/connector/runtime/requests/${request.id}/result`, this.state.tool(`claude:operation:${request.id}`), true).catch(() => {});
-    } finally { this.maintenance = this.update.status === 'uncertain'; }
+    } finally { releaseMaintenance(); }
   }
   async run() {
     if (!this.config.managementToken) return;
@@ -303,7 +356,7 @@ export class ClaudeManagement {
           await this.gateway.call(`/connector/coding/actions/${action.id}/result`, { ...outcome, instanceId: this.instanceId }, true);
         }
         if (!this.pendingOperation) {
-          const inbox = await this.gateway.call('/connector/runtime/inbox?wait=0', undefined, true);
+          const inbox = await this.gateway.call('/connector/runtime/inbox?wait=0&instanceId=' + this.instanceId, undefined, true);
           this.pendingOperation = (async () => {
             for (const request of inbox.requests as RuntimeRequest[]) await this.operation(request);
           })().catch(() => { this.ready = false; }).finally(() => { this.pendingOperation = undefined; });
