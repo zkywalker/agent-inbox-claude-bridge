@@ -4,9 +4,9 @@
     "shared/bridge-release.ts uses the independent Claude repository and signature domain; listed file hashes record the upstream export before that adaptation"
   ],
   "baseCommit": "905f7c0bc8199192b7661c72e44d0b5bf4bd1386",
-  "note": "Selected working-tree files include approved Claude configuration parity, explicit approval outcomes and opt-in full trust. Gateway changes are not yet committed; per-file hashes identify exported bytes.",
+  "note": "Selected working-tree files include approved Claude runtime activity telemetry: Skill names, task progress and native retry/limit evidence. No concurrency, permission, SDK or retry policy changes. Gateway changes remain uncommitted; per-file hashes identify exported bytes.",
   "files": {
-    "adapters/claude/bridge.ts": "3327554b8805177abc98202924f5ff8c2f730d6af7a5914ea5e44dae024f62b0",
+    "adapters/claude/bridge.ts": "ad05dc36119036ecbe705ed1bcb621472a94ee8e2d9147426080b57ee0a03c06",
     "adapters/claude/config.ts": "c4b321bffc8e34eccfeacad9cd05e6dfc6e1351e1b807319cf3c289531e8fdac",
     "adapters/claude/codex-provider.ts": "5e30f9fbdc434f79e93342daadfcb445a3c247793018d333c0dc5f5e2aca664a",
     "adapters/claude/main.ts": "a5421390db918aa1e98054f5b3035e2a58b8c1283144c980cc155b1bcec82a81",
@@ -14,16 +14,17 @@
     "adapters/claude/messages-proxy.ts": "c687c64e76a9489d8b73bf3bbfbd8f79af1394debf9d977193867ff91777d621",
     "adapters/claude/runtime.ts": "3a87c5c06a15d1ddfbed52b292ab55fadc2715e34debe399439a7b7be656a251",
     "adapters/codex/gateway.ts": "c389549941344716db16261460c24c29a79aaa767ab9be076b10259097d42ee2",
-    "adapters/codex/state.ts": "5008a23f09df11b7c5db5583a32c8f41197046a693fadae7f5d7f5d6dd04dae1",
+    "adapters/codex/state.ts": "51e80982c9b961804e6dceca0d8a95210ad465f76cc5c689b6ed0303f7fea6f7",
     "adapters/codex/projects.ts": "f7d31c099508a4a3846dd60688bd9bc0876a4b1d8ae22f1729d5b5b8333db9c7",
     "adapters/codex/files.ts": "24289d57501243f5ae1506021bfbf86fc8b421a85a1e001ddc1574d3a6986e76",
     "adapters/codex/file-references.ts": "a935feff07a13360732df5ceba48478f0b02fbb2fdfbebb135c02877b6833700",
-    "shared/protocol.ts": "b442ce58586c8d735611d48b1581f3d81061f0870ef9f34579f730953bfbfbbf",
+    "shared/protocol.ts": "f835732030f555abdc41edca55c815667b55a86da8ad378be7b4c1ccab613214",
     "shared/runtime.ts": "2d4d99c26ed5afddb2b0f73efab267fde2021861246e1ecbca44a8d55a8a72cc",
     "shared/codex.ts": "7c26cda432600362f90650ba198a2175d80c7cae78734231202876e637226daf",
     "shared/codex-settings.ts": "693929cd5c1a1112fca62fc2d07df1d5c34ea00d81392846685afd0802a73c05",
     "shared/file-references.ts": "c13f2bb3d3c6fe9d0e8dddec0fe7badb5eb8005aa6759954609c13a92cefb303",
     "shared/bridge-update.ts": "c2474a4faa6455ff707a8b3ab868bdf27905708dd28bac2ac1ac87eadacc812e",
-    "shared/bridge-release.ts": "ba6a5b8d8cb062aa51fe57358f419850495ab101a6c4ffd4ada7f1d34ca786e6"
+    "shared/bridge-release.ts": "ba6a5b8d8cb062aa51fe57358f419850495ab101a6c4ffd4ada7f1d34ca786e6",
+    "adapters/claude/activity.ts": "b15598ae97d17f49a91cace365df94a67983c081a96e73a34befe9efee250959"
   }
 }

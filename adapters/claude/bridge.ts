@@ -7,6 +7,7 @@ import type { Delivery, Message } from '../../shared/protocol.js';
 import type { CodexAction, CodexQuestion } from '../../shared/codex.js';
 import { providerEnvironment, type ClaudeConfig } from './config.js';
 import { ClaudeManagement } from './management.js';
+import { ClaudeActivity } from './activity.js';
 
 type Approval = { conversationId: string; gatewayId?: string; input: Record<string, unknown>; questions?: CodexQuestion[]; resolve: (value: PermissionResult) => void };
 type Active = { abort: AbortController; query?: Query; task: Promise<void> };
@@ -28,6 +29,10 @@ export class ClaudeBridge {
     this.bindIdentity('project', config.projectPath);
     this.bindIdentity('gateway', this.gateway.base.origin);
     this.management = new ClaudeManagement(config, this.gateway, state, { busy: id => id ? this.active.has(id) : !!this.active.size, control: action => this.control(action) });
+    for (const row of state.db.prepare("SELECT body FROM outgoing WHERE json_extract(body,'$.runtimeActivity.state') IN ('running','retrying','limited')").all()) {
+      const message: Outgoing = JSON.parse(row.body as string);
+      state.put({ ...message, text: `${message.text}\nBridge 已重启，此项结果待确认。`, runtimeActivity: { ...message.runtimeActivity!, state: 'unknown', updatedAt: new Date().toISOString() } });
+    }
   }
   async initialize(version: string) { await this.management.initialize(version); this.initialized = true; }
   bindIdentity(key: 'project' | 'gateway' | 'agent', value: string) {
@@ -143,7 +148,10 @@ export class ClaudeBridge {
     });
   }
   private permissionPreview(input: Record<string, unknown>) {
-    let text = JSON.stringify(input, (key, value) => /token|password|secret|authorization|api.?key/i.test(key) ? '[redacted]' : value, 2);
+    return this.redactProgress(JSON.stringify(input, (key, value) => /token|password|secret|authorization|api.?key/i.test(key) ? '[redacted]' : value, 2));
+  }
+  private redactProgress(value: string) {
+    let text = value;
     const env = providerEnvironment(this.config);
     for (const [key, value] of Object.entries(env)) if (value && value.length >= 8 && /token|password|secret|api.?key/i.test(key)) text = text.split(value).join('[redacted]');
     for (const value of [this.config.token, this.config.accessClientSecret]) if (value) text = text.split(value).join('[redacted]');
@@ -172,6 +180,9 @@ export class ClaudeBridge {
     let accepted = false, completed = false, streamed = '';
     let messageId: string = randomUUID();
     let session: Session | undefined;
+    const activity = new ClaudeActivity((runtimeActivity, text) => {
+      this.state.put({ conversationId, key: `${inputId}:activity:${runtimeActivity.id}`, text, kind: 'activity', label: '运行进度', streaming: false, ...(this.initialized ? { runtimeActivity: { ...runtimeActivity, id: `${inputId}:${runtimeActivity.id}`, parentId: runtimeActivity.parentId ? `${inputId}:${runtimeActivity.parentId}` : undefined } } : {}) });
+    }, text => this.redactProgress(text));
     const startupTimer = setTimeout(() => active.abort.abort(), 45_000);
     try {
       const projectId = delivery.conversation.projectId ?? this.gateway.config.projects[0].id;
@@ -203,6 +214,7 @@ export class ClaudeBridge {
       if (active.abort.signal.aborted) throw new Error('Stopped before runtime startup');
       active.query = this.runner({ prompt: input(), options });
       for await (const event of active.query) {
+        activity.observe(event);
         if (event.type === 'system' && event.subtype === 'init') {
           clearTimeout(startupTimer);
           this.state.db.prepare('INSERT INTO claude_sessions VALUES(?,?) ON CONFLICT(conversation_id) DO UPDATE SET session_id=excluded.session_id').run(conversationId, event.session_id);
@@ -219,7 +231,7 @@ export class ClaudeBridge {
         if (event.type === 'assistant' && !event.parent_tool_use_id) {
           const text = event.message.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
           if (text) this.emit(conversationId, `${inputId}:${event.message.id}`, text, 'chat');
-          for (const block of event.message.content) if (block.type === 'tool_use') this.emit(conversationId, `${inputId}:${block.id}`, `工具：${block.name}`, 'activity');
+          for (const block of event.message.content) if (block.type === 'tool_use' && block.name !== 'Skill') this.emit(conversationId, `${inputId}:${block.id}`, `工具：${block.name}`, 'activity');
         }
         if (event.type === 'result') {
           completed = true;
@@ -237,6 +249,7 @@ export class ClaudeBridge {
       this.emit(conversationId, `${inputId}:error`, active.abort.signal.aborted ? '任务已中断，未自动重放输入。' : 'Claude 连接或运行失败，结果可能不确定。请检查主机配置及已有回复后发送新消息继续。');
       if (!accepted) await this.ack(delivery, false, 'Claude did not confirm startup').catch(() => {});
     } finally {
+      activity.finish(active.abort.signal.aborted);
       clearTimeout(startupTimer);
       active.query?.close();
       for (const approval of this.approvals.values()) if (approval.conversationId === conversationId) approval.resolve({ behavior: 'deny', message: 'Turn ended' });
@@ -252,7 +265,7 @@ export class ClaudeBridge {
         const created: Message = await this.gateway.call(`/connector/conversations/${message.conversationId}/messages`, { ...message, key: undefined, conversationId: undefined, clientMessageId: row.key });
         id = created.id;
       }
-      await this.gateway.call(`/connector/messages/${id}`, { text: message.text, streaming: message.streaming }, false, 'PATCH');
+      await this.gateway.call(`/connector/messages/${id}`, { text: message.text, streaming: message.streaming, ...(message.runtimeActivity ? { runtimeActivity: message.runtimeActivity } : {}) }, false, 'PATCH');
       this.state.sent(row.key as string, id, Number(row.revision));
     }
   }

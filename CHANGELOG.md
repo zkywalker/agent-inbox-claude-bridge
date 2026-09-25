@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.2 — 2026-09-25
+
+- Publish structured Skill, child-task and tool-progress records with stable input-scoped identities; update existing messages rather than appending each heartbeat.
+- Surface native API/subagent retries, HTTP 429 evidence, quota warnings and terminal errors without replaying work or changing concurrency.
+- Preserve task outcomes, redact known credentials, omit prompts/thinking/tool arguments, and mark missing terminal evidence unknown after stream termination or bridge restart.
+- Bound new progress identities per turn with an explicit omission notice; native task execution is not capped by presentation.
+- Keep SDK 0.3.281, native permissions and independent release signing unchanged. Do not enable additional model-generated progress summaries. Deploy the compatible activity-aware gateway first.
+
+Validation: reducer/offline bridge tests and gateway simulated-SDK integration; real-model concurrency/limit reproduction is not included in this release validation.
+
 ## 0.1.1 — 2026-09-25
 
 - Add opt-in native full trust (`bypassPermissions` with `allowDangerouslySkipPermissions`) and an instance-bound capability report. Other permission modes keep the bypass opt-in disabled; host and OS restrictions still apply.

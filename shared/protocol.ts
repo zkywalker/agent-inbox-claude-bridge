@@ -49,6 +49,20 @@ export interface Attachment {
 }
 export type DeliveryStatus = "received" | "sending" | "delivered" | "failed";
 export type MessageKind = "chat" | "activity" | "system";
+export interface RuntimeActivity {
+  id: string;
+  category: 'skill' | 'task' | 'tool' | 'request';
+  name: string;
+  state: 'running' | 'retrying' | 'limited' | 'completed' | 'failed' | 'stopped' | 'unknown';
+  parentId?: string;
+  updatedAt: string;
+  tool?: string;
+  elapsedSeconds?: number;
+  attempt?: number;
+  maxRetries?: number;
+  retryDelayMs?: number;
+  statusCode?: number;
+}
 /** Presentation-only Codex lifecycle, observed at the adapter boundary. */
 export interface MessageProcess {
   id: string;
@@ -71,6 +85,7 @@ export interface Message {
   seq: number;
   streaming: boolean;
   process?: MessageProcess;
+  runtimeActivity?: RuntimeActivity;
   codexApprovalId?: string;
 }
 export interface Delivery {
