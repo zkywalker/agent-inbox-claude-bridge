@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createSdkMcpServer, query, tool, type Options, type PermissionResult, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { Gateway } from '../codex/gateway.js';
@@ -168,7 +168,7 @@ export class ClaudeBridge {
       }),
       tool('agent_inbox_send', 'Create a separate topic only at the explicit request of the user.', { title: z.string().min(1).max(120), text: z.string().min(1) }, async args => {
         const topic = await this.gateway.call('/connector/conversations', { title: args.title, clientConversationId: randomUUID(), ...(this.config.managementToken ? { projectId: this.management.session(conversationId)?.projectId } : {}) });
-        this.emit(topic.id, randomUUID(), args.text, 'chat');
+        this.state.put({ conversationId: topic.id, key: randomUUID(), text: args.text, kind: 'chat', streaming: false, proactive: true });
         return result({ conversationId: topic.id });
       }),
       tool('agent_inbox_profile', 'Read or update this contact when asked.', { name: z.string().min(1).max(120).optional(), avatarEmoji: z.string().max(16).optional() }, async args =>
@@ -177,11 +177,12 @@ export class ClaudeBridge {
   }
   private async execute(delivery: Delivery, active: Active) {
     const conversationId = delivery.conversation.id, inputId = delivery.message.id;
+    const startedAt = new Date().toISOString();
     let accepted = false, completed = false, streamed = '';
     let messageId: string = randomUUID();
     let session: Session | undefined;
     const activity = new ClaudeActivity((runtimeActivity, text) => {
-      this.state.put({ conversationId, key: `${inputId}:activity:${runtimeActivity.id}`, text, kind: 'activity', label: '运行进度', streaming: false, ...(this.initialized ? { runtimeActivity: { ...runtimeActivity, id: `${inputId}:${runtimeActivity.id}`, parentId: runtimeActivity.parentId ? `${inputId}:${runtimeActivity.parentId}` : undefined } } : {}) });
+      this.state.put({ conversationId, key: `${inputId}:activity:${runtimeActivity.id}`, text, kind: 'activity', label: '运行进度', streaming: false, ...(this.initialized ? { runtimeActivity: { ...runtimeActivity, runId: inputId, id: `${inputId}:${runtimeActivity.id}`, parentId: runtimeActivity.parentId ? `${inputId}:${runtimeActivity.parentId}` : undefined, toolUseId: runtimeActivity.toolUseId ? `${inputId}:${runtimeActivity.toolUseId}` : undefined } } : {}) });
     }, text => this.redactProgress(text));
     const startupTimer = setTimeout(() => active.abort.abort(), 45_000);
     try {
@@ -254,6 +255,11 @@ export class ClaudeBridge {
       active.query?.close();
       for (const approval of this.approvals.values()) if (approval.conversationId === conversationId) approval.resolve({ behavior: 'deny', message: 'Turn ended' });
       this.state.finishStreams(conversationId);
+      if (this.config.managementToken && session && ['idle', 'failed', 'interrupted'].includes(session.state)) {
+        const state = session.state === 'idle' ? 'completed' : session.state === 'failed' ? 'failed' : 'interrupted';
+        this.state.put({ conversationId, key: `${inputId}:terminal`, text: state === 'completed' ? '本次任务已完成。' : state === 'failed' ? '本次任务异常结束。' : '本次任务已停止。', kind: 'activity', streaming: false,
+          process: { id: createHash('sha256').update(inputId).digest('hex'), state, startedAt, completedAt: new Date().toISOString() } });
+      }
       if (session) { session.turnId = null; this.state.save(session); await this.management.publishSession(session).catch(() => {}); }
     }
   }

@@ -3,7 +3,7 @@ import type { ClaudeSelection } from './runtime.js';
 export const PROTOCOL_VERSION = 1;
 export type AgentKind = "hermes" | "openclaw" | "nanobot" | "codex" | "claude" | "custom";
 export const isCodingAgent = (kind: AgentKind | undefined) => kind === 'codex' || kind === 'claude';
-export const avatarPresets = ["codex", "hermes", "openclaw", "nanobot", "inbox", "sparkles", "orbit", "leaf"] as const;
+export const avatarPresets = ["codex", "claude", "hermes", "openclaw", "nanobot", "inbox", "sparkles", "orbit", "leaf"] as const;
 export type AvatarPreset = typeof avatarPresets[number];
 export interface Agent {
   id: string;
@@ -62,6 +62,11 @@ export interface RuntimeActivity {
   maxRetries?: number;
   retryDelayMs?: number;
   statusCode?: number;
+  runId?: string;
+  toolUseId?: string;
+  taskType?: 'agent' | 'shell' | 'mcp' | 'workflow' | 'unknown';
+  statusText?: string;
+  lastHeartbeatAt?: string;
 }
 /** Presentation-only Codex lifecycle, observed at the adapter boundary. */
 export interface MessageProcess {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3 — 2026-09-25
+
+- Publish explicit proactive contact and confirmed main-task endings through the existing durable outbox; preserve legacy custom-connector compatibility.
+- Keep stable task identity, task type and progress distinct; correlate changing heartbeat IDs without manufacturing more tasks.
+- Preserve terminal outcomes and native retry semantics; no SDK, model, permission, concurrency or signing changes.
+- Deploy the compatible gateway before this release. Offline tests do not constitute real push or model acceptance.
+
 ## 0.1.2 — 2026-09-25
 
 - Publish structured Skill, child-task and tool-progress records with stable input-scoped identities; update existing messages rather than appending each heartbeat.

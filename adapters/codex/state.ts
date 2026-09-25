@@ -6,7 +6,7 @@ import type { MessageKind, MessageProcess, RuntimeActivity } from '../../shared/
 import type { CodexOptions } from '../../shared/codex-settings.js';
 
 export interface Session extends CodexSession { provider: string; usage?: RuntimeReport['usage']; lastUsedModel?: string; reasoningEffort?: string | null; environment?: RuntimeReport['environment']; settingsRevision?: number; nativeSettings?: Record<string, any>; initialOptions?: CodexOptions }
-export interface Outgoing { key: string; conversationId: string; text: string; kind: MessageKind; label?: string; streaming: boolean; attachmentIds?: string[]; process?: MessageProcess; runtimeActivity?: RuntimeActivity }
+export interface Outgoing { key: string; conversationId: string; text: string; kind: MessageKind; label?: string; streaming: boolean; attachmentIds?: string[]; process?: MessageProcess; runtimeActivity?: RuntimeActivity; proactive?: boolean }
 export interface PublishedFile {
   clientFileId: string; attachmentId?: string; conversationId: string; projectId: string;
   projectRoot: string; path: string; name: string; size: number; version: string;

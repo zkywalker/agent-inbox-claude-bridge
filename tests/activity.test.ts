@@ -10,6 +10,42 @@ function tracker() {
   return { entries, activity, send: (event: unknown) => activity.observe(event as SDKMessage) };
 }
 
+test('changing heartbeat IDs never create entities or revive failed calls', () => {
+  const { entries, send } = tracker();
+  const heartbeat = (index: number) => send({ type: 'tool_progress', tool_use_id: `skill-heartbeat-${index}`, parent_tool_use_id: 'skill', tool_name: 'Skill', elapsed_time_seconds: index * 30 });
+  heartbeat(0);
+  assert.equal(entries.size, 0);
+  send({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 'skill', name: 'Skill', input: { skill: 'code-review' } }] } });
+  for (let index = 1; index <= 50; index++) heartbeat(index);
+  assert.equal(entries.size, 1);
+  assert.equal(entries.get('skill')?.activity.name, 'code-review');
+  assert.ok(entries.get('skill')?.activity.lastHeartbeatAt);
+  send({ type: 'assistant', parent_tool_use_id: 'skill', message: { content: [{ type: 'tool_use', id: 'nested', name: 'Skill', input: { skill: 'code-review' } }] } });
+  send({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'nested', is_error: true }] } });
+  send({ type: 'tool_progress', heartbeat: true, tool_use_id: 'nested', tool_name: 'Skill', elapsed_time_seconds: 5 });
+  assert.equal(entries.get('nested')?.activity.state, 'failed');
+  assert.equal(entries.size, 2);
+});
+
+test('task titles and native types remain stable while progress changes and correlation arrives late', () => {
+  const { entries, send } = tracker();
+  for (let index = 0; index < 10; index++) send({ type: 'system', subtype: 'task_started', task_id: `agent-${index}`, task_type: 'local_agent', description: `Review ${index}` });
+  send({ type: 'system', subtype: 'task_started', task_id: 'shell', task_type: 'local_bash', description: 'Run checks' });
+  send({ type: 'system', subtype: 'task_progress', task_id: 'agent-0', tool_use_id: 'spawn', description: 'Reading files', usage: { duration_ms: 1000 } });
+  const updated = entries.get('task:agent-0')!.activity;
+  assert.equal(updated.name, 'Review 0');
+  assert.equal(updated.statusText, 'Reading files');
+  assert.equal(updated.toolUseId, 'spawn');
+  assert.equal(updated.parentId, undefined);
+  assert.equal([...entries.values()].filter(entry => entry.activity.taskType === 'agent').length, 10);
+  assert.equal(entries.get('task:shell')?.activity.taskType, 'shell');
+  send({ type: 'tool_progress', tool_use_id: 'spawn', task_id: 'agent-0', tool_name: 'Agent', elapsed_time_seconds: 5, subagent_retry: { attempt: 1, max_retries: 3, retry_delay_ms: 1000, error_status: 429 } });
+  send({ type: 'tool_progress', heartbeat: true, tool_use_id: 'spawn', task_id: 'agent-0', tool_name: 'Agent', elapsed_time_seconds: 6 });
+  assert.equal(entries.get('task:agent-0')?.activity.state, 'retrying');
+  send({ type: 'tool_progress', heartbeat: true, tool_use_id: 'spawn', task_id: 'agent-0', tool_name: 'Agent', elapsed_time_seconds: 7, subagent_retry: { attempt: 2, max_retries: 3, retry_delay_ms: 1000, error_status: 429 } });
+  assert.equal(entries.get('task:agent-0')?.activity.attempt, 2);
+});
+
 test('Skill and nested tasks retain independent identity, redact summaries, and do not publish prompts or thinking', () => {
   const { entries, send, activity } = tracker();
   send({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 'skill', name: 'Skill', input: { skill: 'code-review', args: 'private-input' } }, { type: 'thinking', thinking: 'private-thought' }] } });

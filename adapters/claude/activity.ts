@@ -1,5 +1,6 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { RuntimeActivity } from '../../shared/protocol.js';
+import { legacyHeartbeatTarget } from '../../shared/runtime-activity.js';
 
 type Entry = { activity: RuntimeActivity; detail: string };
 const activeStates = new Set(['running', 'retrying', 'limited']);
@@ -23,10 +24,18 @@ export class ClaudeActivity {
       return;
     }
     const activity: RuntimeActivity = {
+      ...previous?.activity,
       id, category, name: this.clean(name).slice(0, 200) || '运行任务', state,
-      ...extra, ...(previous ? { parentId: previous.activity.parentId } : {}), updatedAt: new Date().toISOString(),
+      ...Object.fromEntries(Object.entries(extra).filter(([, value]) => value !== undefined)),
+      ...(previous ? { parentId: previous.activity.parentId, toolUseId: previous.activity.toolUseId ?? extra.toolUseId } : {}), updatedAt: new Date().toISOString(),
     };
     const safeDetail = this.clean(detail).slice(0, 4000);
+    if (state !== 'retrying' && state !== 'unknown' && state !== 'limited') {
+      delete activity.attempt;
+      delete activity.maxRetries;
+      delete activity.retryDelayMs;
+      if (state !== 'failed') delete activity.statusCode;
+    }
     this.entries.set(id, { activity, detail: safeDetail });
     this.publish(activity, safeDetail);
   }
@@ -52,6 +61,21 @@ export class ClaudeActivity {
       }
     }
     if (event.type === 'tool_progress') {
+      const heartbeatTarget = legacyHeartbeatTarget({ id: event.tool_use_id, parentId: event.parent_tool_use_id ?? undefined, category: 'tool' } as RuntimeActivity);
+      if (event.heartbeat || heartbeatTarget) {
+        const target = heartbeatTarget ?? event.tool_use_id;
+        const task = event.task_id ?? this.taskTools.get(target);
+        const id = task ? `task:${task}` : target;
+        const previous = this.entries.get(id);
+        if (previous) {
+          const retry = event.subagent_retry;
+          this.put(id, previous.activity.category, previous.activity.name, retry && !terminalStates.has(previous.activity.state) ? 'retrying' : previous.activity.state, retry && !terminalStates.has(previous.activity.state) ? '原生运行时正在重试请求；网关没有重放任务。' : previous.detail, {
+            lastHeartbeatAt: new Date().toISOString(),
+            ...(retry && !terminalStates.has(previous.activity.state) ? { attempt: retry.attempt, maxRetries: retry.max_retries, retryDelayMs: retry.retry_delay_ms, statusCode: retry.error_status ?? undefined } : {}),
+          });
+        }
+        return;
+      }
       const taskId = event.task_id ?? this.taskTools.get(event.tool_use_id);
       if (taskId && this.hiddenTasks.has(taskId)) return;
       const id = taskId ? `task:${taskId}` : event.tool_use_id;
@@ -72,13 +96,16 @@ export class ClaudeActivity {
         const id = `task:${event.task_id}`;
         const previous = this.entries.get(id)?.activity;
         if ('tool_use_id' in event && event.tool_use_id) this.taskTools.set(event.tool_use_id, event.task_id);
-        if (event.subtype === 'task_started') this.put(id, 'task', event.description, 'running', '原生任务已启动。', { parentId: event.tool_use_id }, true);
-        if (event.subtype === 'task_progress') this.put(id, 'task', event.description, 'running', event.summary ?? '收到原生子任务进度。', { parentId: event.tool_use_id, tool: event.last_tool_name ? this.clean(event.last_tool_name).slice(0, 200) : undefined, elapsedSeconds: event.usage.duration_ms / 1000 });
-        if (event.subtype === 'task_notification') this.put(id, 'task', previous?.name ?? '原生子任务', event.status, event.summary, { parentId: event.tool_use_id, elapsedSeconds: event.usage ? event.usage.duration_ms / 1000 : undefined, statusCode: event.status === 'failed' ? rateLimitStatus(event.summary) : undefined });
+        if (event.subtype === 'task_started') {
+          const taskType: RuntimeActivity['taskType'] = event.task_type === 'local_agent' || event.subagent_type ? 'agent' : event.task_type === 'local_bash' ? 'shell' : event.task_type === 'mcp_task' ? 'mcp' : event.task_type === 'local_workflow' ? 'workflow' : 'unknown';
+          this.put(id, 'task', event.description, 'running', '原生任务已启动。', { toolUseId: event.tool_use_id, taskType }, true);
+        }
+        if (event.subtype === 'task_progress') this.put(id, 'task', previous?.name ?? '原生任务（未收到启动记录）', 'running', event.summary ?? '收到原生任务进度。', { toolUseId: event.tool_use_id, statusText: this.clean(event.summary ?? event.description).slice(0, 1000), tool: event.last_tool_name ? this.clean(event.last_tool_name).slice(0, 200) : undefined, elapsedSeconds: event.usage.duration_ms / 1000 });
+        if (event.subtype === 'task_notification') this.put(id, 'task', previous?.name ?? '原生任务', event.status, event.summary, { toolUseId: event.tool_use_id, elapsedSeconds: event.usage ? event.usage.duration_ms / 1000 : undefined, statusCode: event.status === 'failed' ? rateLimitStatus(event.summary) : undefined });
         if (event.subtype === 'task_updated') {
           const status = event.patch.status;
           const state = status === 'killed' ? 'stopped' : status === 'paused' || status === 'pending' ? 'unknown' : status ?? previous?.state ?? 'unknown';
-          this.put(id, 'task', event.patch.description ?? previous?.name ?? '原生子任务', state, event.patch.error ?? '原生任务状态已更新。', { statusCode: event.patch.error ? rateLimitStatus(event.patch.error) : undefined });
+          this.put(id, 'task', previous?.name ?? '原生任务', state, event.patch.error ?? '原生任务状态已更新。', { statusText: event.patch.description ? this.clean(event.patch.description).slice(0, 1000) : undefined, statusCode: event.patch.error ? rateLimitStatus(event.patch.error) : undefined });
         }
       }
       if (event.subtype === 'api_retry') this.put('request:main', 'request', '模型请求', 'retrying', '原生运行时报告请求重试；这不是网关自动重放。', { attempt: event.attempt, maxRetries: event.max_retries, retryDelayMs: event.retry_delay_ms, statusCode: event.error_status ?? undefined });
