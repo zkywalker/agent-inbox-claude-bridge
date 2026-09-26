@@ -4,9 +4,9 @@
     "shared/bridge-release.ts uses the independent Claude repository and signature domain; listed file hashes record the upstream export before that adaptation"
   ],
   "baseCommit": "905f7c0bc8199192b7661c72e44d0b5bf4bd1386",
-  "note": "Approved working-tree export: stable task/heartbeat identities and types, explicit proactive contact and confirmed main-task terminal outbox records. Gateway must deploy first. No concurrency, permission, SDK, native version or signing policy changes. Per-file hashes identify uncommitted upstream source.",
+  "note": "Approved isolated summary update on v0.1.3: successful native result excerpts are bounded and credential-redacted, associated only with that turn. Compatible gateway deployed first. No permission, SDK, concurrency, native version or signing changes. Updated hashes identify the reviewed isolated candidate files.",
   "files": {
-    "adapters/claude/bridge.ts": "dca8e339ca69ec96b84f79bb19508c218ba1001d1dcce185b32661b0a6097de0",
+    "adapters/claude/bridge.ts": "9b16d4711599407a7c9b0519b5af09f01c1c1a241a2df358303a7b97546c83ca",
     "adapters/claude/config.ts": "c4b321bffc8e34eccfeacad9cd05e6dfc6e1351e1b807319cf3c289531e8fdac",
     "adapters/claude/codex-provider.ts": "5e30f9fbdc434f79e93342daadfcb445a3c247793018d333c0dc5f5e2aca664a",
     "adapters/claude/main.ts": "a5421390db918aa1e98054f5b3035e2a58b8c1283144c980cc155b1bcec82a81",
@@ -18,7 +18,7 @@
     "adapters/codex/projects.ts": "f7d31c099508a4a3846dd60688bd9bc0876a4b1d8ae22f1729d5b5b8333db9c7",
     "adapters/codex/files.ts": "24289d57501243f5ae1506021bfbf86fc8b421a85a1e001ddc1574d3a6986e76",
     "adapters/codex/file-references.ts": "a935feff07a13360732df5ceba48478f0b02fbb2fdfbebb135c02877b6833700",
-    "shared/protocol.ts": "495528dda6c4e3ed050e7bb4f361dfe113d16458f2af0bc4347360bd016a92b9",
+    "shared/protocol.ts": "cebf83153d1f292009cd0b0b2ce5c20212573f64b5cab4bb325d509014ac6a43",
     "shared/runtime.ts": "2d4d99c26ed5afddb2b0f73efab267fde2021861246e1ecbca44a8d55a8a72cc",
     "shared/codex.ts": "7c26cda432600362f90650ba198a2175d80c7cae78734231202876e637226daf",
     "shared/codex-settings.ts": "693929cd5c1a1112fca62fc2d07df1d5c34ea00d81392846685afd0802a73c05",

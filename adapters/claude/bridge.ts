@@ -178,7 +178,7 @@ export class ClaudeBridge {
   private async execute(delivery: Delivery, active: Active) {
     const conversationId = delivery.conversation.id, inputId = delivery.message.id;
     const startedAt = new Date().toISOString();
-    let accepted = false, completed = false, streamed = '';
+    let accepted = false, completed = false, streamed = '', finalText = '';
     let messageId: string = randomUUID();
     let session: Session | undefined;
     const activity = new ClaudeActivity((runtimeActivity, text) => {
@@ -236,6 +236,7 @@ export class ClaudeBridge {
         }
         if (event.type === 'result') {
           completed = true;
+          if (!event.is_error && 'result' in event && typeof event.result === 'string') finalText = event.result;
           session.state = event.is_error ? 'failed' : active.abort.signal.aborted ? 'interrupted' : 'idle';
           if (event.usage) session.usage = { contextTokens: null, contextLimit: null, inputTokens: event.usage.input_tokens, outputTokens: event.usage.output_tokens, cacheReadTokens: event.usage.cache_read_input_tokens ?? null, contextSource: 'unknown', totalsSource: 'runtime' };
           this.state.save(session);
@@ -258,7 +259,7 @@ export class ClaudeBridge {
       if (this.config.managementToken && session && ['idle', 'failed', 'interrupted'].includes(session.state)) {
         const state = session.state === 'idle' ? 'completed' : session.state === 'failed' ? 'failed' : 'interrupted';
         this.state.put({ conversationId, key: `${inputId}:terminal`, text: state === 'completed' ? '本次任务已完成。' : state === 'failed' ? '本次任务异常结束。' : '本次任务已停止。', kind: 'activity', streaming: false,
-          process: { id: createHash('sha256').update(inputId).digest('hex'), state, startedAt, completedAt: new Date().toISOString() } });
+          process: { id: createHash('sha256').update(inputId).digest('hex'), state, startedAt, completedAt: new Date().toISOString(), ...(state === 'completed' && finalText ? { summary: this.redactProgress(finalText).slice(0, 2000) } : {}) } });
       }
       if (session) { session.turnId = null; this.state.save(session); await this.management.publishSession(session).catch(() => {}); }
     }

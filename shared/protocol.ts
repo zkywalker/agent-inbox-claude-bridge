@@ -74,6 +74,7 @@ export interface MessageProcess {
   state: "running" | "waiting" | "completed" | "failed" | "interrupted" | "unknown";
   startedAt: string;
   completedAt?: string;
+  summary?: string;
 }
 export interface Message {
   id: string;
