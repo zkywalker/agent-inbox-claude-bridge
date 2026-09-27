@@ -6,7 +6,8 @@ import type { MessageKind, MessageProcess, RuntimeActivity } from '../../shared/
 import type { CodexOptions } from '../../shared/codex-settings.js';
 
 export interface Session extends CodexSession { provider: string; usage?: RuntimeReport['usage']; lastUsedModel?: string; reasoningEffort?: string | null; environment?: RuntimeReport['environment']; settingsRevision?: number; nativeSettings?: Record<string, any>; initialOptions?: CodexOptions }
-export interface Outgoing { key: string; conversationId: string; text: string; kind: MessageKind; label?: string; streaming: boolean; attachmentIds?: string[]; process?: MessageProcess; runtimeActivity?: RuntimeActivity; proactive?: boolean }
+export interface Outgoing { key: string; conversationId: string; text: string; kind: MessageKind; label?: string; streaming: boolean; attachmentIds?: string[]; process?: MessageProcess; runtimeActivity?: RuntimeActivity; proactive?: boolean; notificationProcessId?: string }
+export interface OutgoingFailure { revision: number; attempts: number; retryAt: number; blocked: boolean; status: number | null; reason: string; failedAt: number }
 export interface PublishedFile {
   clientFileId: string; attachmentId?: string; conversationId: string; projectId: string;
   projectRoot: string; path: string; name: string; size: number; version: string;
@@ -33,6 +34,9 @@ export class BridgeState {
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS inputs (message_id TEXT PRIMARY KEY, state TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS outgoing (key TEXT PRIMARY KEY, body TEXT NOT NULL, message_id TEXT, revision INTEGER NOT NULL, sent_revision INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS outgoing_failures (key TEXT PRIMARY KEY, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS outgoing_attempts (key TEXT PRIMARY KEY, attempted_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_reports (id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 1, sent_revision INTEGER NOT NULL DEFAULT 0, reported_at INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS processes (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tool_results (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS project_directories (id TEXT PRIMARY KEY, root_id TEXT NOT NULL, path TEXT NOT NULL, UNIQUE(root_id,path));
@@ -56,6 +60,7 @@ export class BridgeState {
     }
   }
   sessions(): Session[] { return this.db.prepare('SELECT body FROM sessions').all().map(row => JSON.parse(row.body as string)); }
+  session(id: string): Session | undefined { const row = this.db.prepare('SELECT body FROM sessions WHERE id=?').get(id); return row ? JSON.parse(row.body as string) : undefined; }
   nativeUpdate(): CodexUpdateInfo | undefined {
     const row = this.db.prepare('SELECT body FROM native_update WHERE id=1').get();
     return row ? JSON.parse(row.body as string) : undefined;
@@ -71,7 +76,28 @@ export class BridgeState {
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
-  save(session: Session) { this.db.prepare('INSERT INTO sessions VALUES(?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body').run(session.conversationId, JSON.stringify(session)); }
+  save(session: Session) {
+    const body = JSON.stringify(session);
+    if (this.db.prepare('SELECT body FROM sessions WHERE id=?').get(session.conversationId)?.body === body) return;
+    this.db.exec('SAVEPOINT session_save');
+    try {
+      this.db.prepare('INSERT INTO sessions VALUES(?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body').run(session.conversationId, body);
+      this.db.prepare('INSERT INTO session_reports(id) VALUES(?) ON CONFLICT(id) DO UPDATE SET revision=revision+1').run(session.conversationId);
+      this.db.exec('RELEASE session_save');
+    } catch (error) { this.db.exec('ROLLBACK TO session_save; RELEASE session_save'); throw error; }
+  }
+  dirtySessions(limit = 30): Session[] {
+    return this.db.prepare('SELECT s.body FROM sessions s LEFT JOIN session_reports r ON s.id=r.id WHERE r.id IS NULL OR r.revision>r.sent_revision ORDER BY COALESCE(r.reported_at,0),s.rowid LIMIT ?').all(limit).map(row => JSON.parse(row.body as string));
+  }
+  sessionRevision(id: string): number { return Number(this.db.prepare('SELECT revision FROM session_reports WHERE id=?').get(id)?.revision ?? 0); }
+  sessionReport(id: string) { return this.db.prepare('SELECT * FROM session_reports WHERE id=?').get(id); }
+  markSessionDirty(id: string) { this.db.prepare('INSERT INTO session_reports(id) VALUES(?) ON CONFLICT(id) DO UPDATE SET revision=revision+1').run(id); }
+  invalidateSessionReports() { this.db.prepare('UPDATE session_reports SET revision=revision+1,sent_revision=-1').run(); }
+  postponeSessionReport(id: string, at: number) { this.db.prepare('UPDATE session_reports SET reported_at=? WHERE id=?').run(at, id); }
+  hasUnfinishedSessions() { return !!this.db.prepare("SELECT 1 FROM sessions WHERE json_extract(body,'$.state') IN ('running','waiting','unknown') LIMIT 1").get(); }
+  reportedSession(id: string, revision: number, at: number) {
+    this.db.prepare('INSERT INTO session_reports(id,revision,sent_revision,reported_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET sent_revision=MAX(sent_revision,excluded.sent_revision),reported_at=excluded.reported_at').run(id, revision, revision, at);
+  }
   input(id: string): string | undefined { return this.db.prepare('SELECT state FROM inputs WHERE message_id=?').get(id)?.state as string | undefined; }
   markInput(id: string, state: string) { this.db.prepare('INSERT INTO inputs VALUES(?,?) ON CONFLICT(message_id) DO UPDATE SET state=excluded.state').run(id, state); }
   outgoing(key: string): Outgoing | undefined {
@@ -100,7 +126,9 @@ export class BridgeState {
   updateProcess(threadId: string, turnId: string | null | undefined, state: MessageProcess['state'], completedAt?: string) {
     const prior = this.turnProcess(threadId, turnId);
     if (!prior || !['running', 'waiting'].includes(prior.state)) return;
-    this.saveProcess({ id: prior.id, startedAt: prior.startedAt, state, ...(completedAt ? { completedAt } : {}) });
+    const result = state === 'completed' ? this.db.prepare("SELECT body FROM outgoing WHERE json_extract(body,'$.notificationProcessId')=? AND json_extract(body,'$.kind')='chat' AND json_extract(body,'$.streaming')=0 ORDER BY rowid DESC LIMIT 1").get(prior.id) : undefined;
+    const summary = result ? (JSON.parse(result.body as string) as Outgoing).text.slice(0, 2000) : undefined;
+    this.saveProcess({ id: prior.id, startedAt: prior.startedAt, state, ...(completedAt ? { completedAt } : {}), ...(summary ? { summary } : {}) });
   }
   private saveProcess(process: MessageProcess) {
     // Commit the lifecycle and every pending/published record together, including
@@ -113,11 +141,28 @@ export class BridgeState {
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
-  dirty() { return this.db.prepare('SELECT * FROM outgoing WHERE revision>sent_revision ORDER BY rowid LIMIT 30').all(); }
+  dirty(at = Date.now()) {
+    const auth = this.tool('outgoing:authentication');
+    if (auth?.retryAt > at) return [];
+    return this.db.prepare(`WITH eligible AS (SELECT o.*,o.rowid AS row_order,COALESCE(a.attempted_at,0) AS attempted_at,
+        ROW_NUMBER() OVER (PARTITION BY json_extract(o.body,'$.conversationId') ORDER BY COALESCE(a.attempted_at,0),o.rowid) AS topic_position
+      FROM outgoing o LEFT JOIN outgoing_failures f ON o.key=f.key LEFT JOIN outgoing_attempts a ON o.key=a.key
+      WHERE o.revision>o.sent_revision AND (f.key IS NULL OR
+        (COALESCE(json_extract(f.body,'$.blocked'),0)=0 AND json_extract(f.body,'$.retryAt')<=?) OR
+        (json_extract(f.body,'$.blocked')=1 AND json_extract(f.body,'$.revision')<>o.revision)))
+      SELECT * FROM eligible ORDER BY topic_position,attempted_at,row_order LIMIT 30`).all(at);
+  }
+  attemptedOutgoing(key: string, at: number) { this.db.prepare('INSERT INTO outgoing_attempts VALUES(?,?) ON CONFLICT(key) DO UPDATE SET attempted_at=excluded.attempted_at').run(key, at); }
+  outgoingFailure(key: string): OutgoingFailure | undefined { const row = this.db.prepare('SELECT body FROM outgoing_failures WHERE key=?').get(key); return row ? JSON.parse(row.body as string) : undefined; }
+  failOutgoing(key: string, failure: OutgoingFailure) { this.db.prepare('INSERT INTO outgoing_failures VALUES(?,?) ON CONFLICT(key) DO UPDATE SET body=excluded.body').run(key, JSON.stringify(failure)); }
+  createdOutgoing(key: string, messageId: string) { this.db.prepare('UPDATE outgoing SET message_id=? WHERE key=?').run(messageId, key); }
   finishStreams(conversationId: string) {
     for (const row of this.db.prepare("SELECT body FROM outgoing WHERE json_extract(body,'$.conversationId')=? AND json_extract(body,'$.streaming')=1").all(conversationId)) this.put({ ...JSON.parse(row.body as string), streaming: false });
   }
-  sent(key: string, messageId: string, revision: number) { this.db.prepare('UPDATE outgoing SET message_id=?,sent_revision=? WHERE key=?').run(messageId, revision, key); }
+  sent(key: string, messageId: string, revision: number) {
+    this.db.prepare('UPDATE outgoing SET message_id=?,sent_revision=MAX(sent_revision,?) WHERE key=?').run(messageId, revision, key);
+    this.db.prepare('DELETE FROM outgoing_failures WHERE key=?').run(key);
+  }
   tool(id: string): any { const row = this.db.prepare('SELECT body FROM tool_results WHERE id=?').get(id); return row ? JSON.parse(row.body as string) : undefined; }
   saveTool(id: string, result: any) { this.db.prepare('INSERT OR REPLACE INTO tool_results VALUES(?,?)').run(id, JSON.stringify(result)); }
   publishedFile(key: string): PublishedFile | undefined {
