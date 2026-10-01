@@ -38,6 +38,7 @@ export class BridgeState {
       CREATE TABLE IF NOT EXISTS outgoing_attempts (key TEXT PRIMARY KEY, attempted_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_reports (id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 1, sent_revision INTEGER NOT NULL DEFAULT 0, reported_at INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS processes (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS process_progress_items (process_id TEXT NOT NULL, item_key TEXT NOT NULL, kind TEXT NOT NULL, fingerprint TEXT NOT NULL, PRIMARY KEY(process_id,item_key));
       CREATE TABLE IF NOT EXISTS tool_results (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS project_directories (id TEXT PRIMARY KEY, root_id TEXT NOT NULL, path TEXT NOT NULL, UNIQUE(root_id,path));
       CREATE TABLE IF NOT EXISTS registered_projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, directory_id TEXT NOT NULL UNIQUE);
@@ -118,7 +119,25 @@ export class BridgeState {
     if (prior) return prior;
     const process: MessageProcess = { id, state: 'running', startedAt };
     this.db.prepare('INSERT INTO processes VALUES(?,?,?)').run(id, conversationId, JSON.stringify(process));
+    // A sentinel proves coverage began with this turn, including zero tool calls.
+    this.db.prepare('INSERT INTO process_progress_items VALUES(?,?,?,?)').run(id, '', 'start', '');
     return process;
+  }
+  observeProgress(id: string, key: string, kind: NonNullable<MessageProcess['progress']>['kind'], summary: string, fingerprint: string, observedAt: string) {
+    const process = this.process(id);
+    if (!process || !['running', 'waiting'].includes(process.state) || !summary.trim()) return;
+    const itemKey = stableKey(key);
+    const prior = this.db.prepare('SELECT fingerprint FROM process_progress_items WHERE process_id=? AND item_key=?').get(id, itemKey);
+    if (prior?.fingerprint === fingerprint) return;
+    this.db.exec('SAVEPOINT process_progress');
+    try {
+      this.db.prepare('INSERT INTO process_progress_items VALUES(?,?,?,?) ON CONFLICT(process_id,item_key) DO UPDATE SET fingerprint=excluded.fingerprint').run(id, itemKey, kind, fingerprint);
+      const complete = this.db.prepare("SELECT 1 FROM process_progress_items WHERE process_id=? AND item_key=''").get(id);
+      const toolCalls = complete ? Number(this.db.prepare("SELECT COUNT(*) AS count FROM process_progress_items WHERE process_id=? AND kind='tool'").get(id)!.count) : undefined;
+      const progress = { kind, summary: summary.trim().slice(0, 240), observedAt, ...(toolCalls !== undefined ? { toolCalls } : {}) };
+      this.db.prepare('UPDATE processes SET body=? WHERE id=?').run(JSON.stringify({ ...process, progress }), id);
+      this.db.exec('RELEASE process_progress');
+    } catch (error) { this.db.exec('ROLLBACK TO process_progress; RELEASE process_progress'); throw error; }
   }
   turnProcess(threadId: string, turnId: string | null | undefined): MessageProcess | undefined {
     return turnId ? this.process(processKey(threadId, turnId)) : undefined;
@@ -128,7 +147,7 @@ export class BridgeState {
     if (!prior || !['running', 'waiting'].includes(prior.state)) return;
     const result = state === 'completed' ? this.db.prepare("SELECT body FROM outgoing WHERE json_extract(body,'$.notificationProcessId')=? AND json_extract(body,'$.kind')='chat' AND json_extract(body,'$.streaming')=0 ORDER BY rowid DESC LIMIT 1").get(prior.id) : undefined;
     const summary = result ? (JSON.parse(result.body as string) as Outgoing).text.slice(0, 2000) : undefined;
-    this.saveProcess({ id: prior.id, startedAt: prior.startedAt, state, ...(completedAt ? { completedAt } : {}), ...(summary ? { summary } : {}) });
+    this.saveProcess({ ...prior, state, ...(completedAt ? { completedAt } : {}), ...(summary ? { summary } : {}) });
   }
   private saveProcess(process: MessageProcess) {
     // Commit the lifecycle and every pending/published record together, including

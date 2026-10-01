@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { speechToolDescription } from '../../shared/speech-generation.js';
+import { callSpeechTool, speechToolSchema } from '../../shared/speech-tool.js';
 import { setTimeout as transportDelay } from 'node:timers/promises';
 import { createSdkMcpServer, query, tool, type Options, type PermissionResult, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
@@ -169,6 +171,11 @@ export class ClaudeBridge {
   private tools(conversationId: string) {
     const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
     return createSdkMcpServer({ name: 'agent-inbox', version: '1.0.0', tools: [
+      tool('agent_inbox_generate_speech', speechToolDescription + ' Deliver with agent_inbox_send_attachment.', speechToolSchema.shape, async args => result(await callSpeechTool(args, (path, body) => this.gateway.call(path, body)))),
+      tool('agent_inbox_send_attachment', 'Send an existing gateway attachment to this conversation. Reuse clientMessageId after uncertain delivery.', { attachmentId: z.string().uuid(), clientMessageId: z.string().min(1).max(128), text: z.string().max(100000).optional() }, async args => {
+        const sent = await this.gateway.call(`/connector/conversations/${conversationId}/messages`, { attachmentIds: [args.attachmentId], text: args.text ?? '', clientMessageId: args.clientMessageId });
+        return result({ messageId: sent.id, attachmentId: args.attachmentId, delivery: 'persisted' });
+      }),
       tool('agent_inbox_send_file', 'Upload a non-hidden project file as an Inbox deliverable.', { path: z.string(), text: z.string().optional() }, async args => {
         const session = this.management.session(conversationId);
         const attachment = this.config.managementToken && session ? await this.management.files.publish(args.path, session.projectId, conversationId, randomUUID()) : await this.gateway.upload(args.path, this.management.project(session).path);

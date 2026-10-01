@@ -32,5 +32,20 @@
     "shared/stickers.ts": "a8d64ec9b1d384aec9a0cf036457d60ce7cb8b5145a460a6dd413ad05650e383",
     "tests/connector-transport.test.ts": "b703cd8eab606eae7be156e4d98bf0d66e21850c27d50578250a29ce855b7b27",
     "tests/codex-delivery-poll.test.ts": "0d9caa3efdc9250fb4f1be95136c17600c389b8ecb7dcdd4177160e6a40c07a0"
-  }
+  },
+  "exports": [
+    {
+      "at": "2026-10-01T04:36:31.837Z",
+      "upstreamBase": "d4fbd2c9c34e272b05e397b39fe490f9a9ede29c",
+      "note": "Reviewed committed export: provider-neutral speech tool, explicit attachment delivery and durable process progress. Existing signed updater and host lifecycle are preserved.",
+      "files": {
+        "adapters/claude/bridge.ts": "d8ffc0cbc351414fa034896093ebc1ebc811ca22de9ff53173f7baa08936ed26",
+        "adapters/codex/state.ts": "42e685ca0e560ab4023038881be69180332290390c06d756f5aacb6545b6ea8a",
+        "shared/speech-generation.ts": "f04a0d248668117be632dd5145daec08f24bebd75dccb9f823381829dd380574",
+        "shared/speech-tool.ts": "10b055b50b0191ea8c4ecf8898f55e05a6292e8f3bb8c00044244066c9ba48d0",
+        "shared/protocol.ts": "c64cb5bcf8f55fd471c023a4af9aa9e9b985d69b1765265f5025d22f0e16818e"
+      },
+      "upstreamCommit": "2c36c7de10e85af355574f1408e9e4763196724a"
+    }
+  ]
 }

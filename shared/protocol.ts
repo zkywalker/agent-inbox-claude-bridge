@@ -2,7 +2,7 @@ import type { CodexSelection } from './codex-settings.js';
 import type { ClaudeSelection } from './runtime.js';
 import type { StickerMessageContent } from './stickers.js';
 export const PROTOCOL_VERSION = 1;
-export type AgentKind = "hermes" | "openclaw" | "nanobot" | "codex" | "claude" | "custom" | "chatbot";
+export type AgentKind = "hermes" | "openclaw" | "nanobot" | "codex" | "claude" | "custom";
 export const isCodingAgent = (kind: AgentKind | undefined) => kind === 'codex' || kind === 'claude';
 export const avatarPresets = ["codex", "claude", "hermes", "openclaw", "nanobot", "inbox", "sparkles", "orbit", "leaf"] as const;
 export type AvatarPreset = typeof avatarPresets[number];
@@ -19,13 +19,15 @@ export interface Agent {
 }
 export interface Conversation {
   id: string;
-  agentId: string;
+  agentId: string | null;
+  engine?: 'pi';
   projectId?: string;
   /** Initial Codex selection only; confirmed current settings come from runtime reports. */
   codexSettings?: CodexSelection;
   claudeSettings?: ClaudeSelection;
   title: string;
   archived: boolean;
+  pinned?: boolean;
   createdAt: string;
   updatedAt: string;
   lastMessage: string | null;
@@ -76,6 +78,14 @@ export interface MessageProcess {
   startedAt: string;
   completedAt?: string;
   summary?: string;
+  /** Native progress evidence, independent of message synchronization timestamps. */
+  progress?: {
+    kind: 'tool' | 'thinking' | 'note';
+    summary: string;
+    observedAt: string;
+    /** Distinct native tool items since the observed turn start; absent for partial coverage. */
+    toolCalls?: number;
+  };
 }
 export interface Message {
   id: string;
