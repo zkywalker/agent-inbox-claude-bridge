@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import type { Message } from '../../shared/protocol.js';
 import { Gateway, GatewayError } from './gateway.js';
-import { BridgeState, type Outgoing } from './state.js';
+import { BridgeState, stableKey, type Outgoing } from './state.js';
 
 export const OUTGOING_MAX_TEXT = 100_000;
 export const OUTGOING_AUTH_RETRY_MS = 60_000;
@@ -26,11 +26,46 @@ function matches(created: Message, message: Outgoing) {
 /** Delivery retries never execute a runtime. Identity and output live in BridgeState. */
 export class OutgoingTransport {
   private pending?: Promise<number>;
+  private acknowledged = new Map<string, { text: string; revision: number }>();
+  private acknowledgedChars = 0;
   constructor(readonly state: BridgeState, readonly gateway: Gateway, readonly now = Date.now) {}
+  private remember(key: string, text: string, revision?: number) {
+    if (!Number.isSafeInteger(revision)) return;
+    this.acknowledgedChars -= this.acknowledged.get(key)?.text.length ?? 0;
+    this.acknowledged.delete(key);
+    this.acknowledged.set(key, { text, revision: revision! }); this.acknowledgedChars += text.length;
+    while (this.acknowledged.size > 64 || this.acknowledgedChars > 1024 * 1024) {
+      const oldest = this.acknowledged.keys().next().value!;
+      this.acknowledgedChars -= this.acknowledged.get(oldest)!.text.length; this.acknowledged.delete(oldest);
+    }
+  }
   flush(): Promise<number> {
+    this.state.flushBuffered();
     if (this.pending) return this.pending;
     this.pending = this.sendBatch().finally(() => { this.pending = undefined; });
     return this.pending;
+  }
+  async run(signal: AbortSignal) {
+    let wake: (() => void) | undefined, changed = false;
+    const unsubscribe = this.state.subscribeOutgoing(() => { changed = true; wake?.(); });
+    const aborted = () => wake?.();
+    signal.addEventListener('abort', aborted, { once: true });
+    try {
+      while (!signal.aborted) {
+        changed = false;
+        let delay: number | undefined;
+        try { await this.flush(); delay = this.state.nextOutgoingDelay(this.now()); }
+        catch { delay = 1000; }
+        if (signal.aborted) break;
+        if (changed || delay === 0) continue;
+        await new Promise<void>(resolve => {
+          const timer = delay === undefined ? undefined : setTimeout(() => finish(), delay);
+          const finish = () => { clearTimeout(timer); wake = undefined; resolve(); };
+          wake = finish;
+          if (changed || signal.aborted) finish();
+        });
+      }
+    } finally { unsubscribe(); signal.removeEventListener('abort', aborted); }
   }
   private async sendBatch(): Promise<number> {
     const queues = new Map<string, ReturnType<BridgeState['dirty']>>();
@@ -57,14 +92,30 @@ export class OutgoingTransport {
               const { key: _key, conversationId: _conversationId, notificationProcessId: _notificationProcessId, ...body } = message;
               const created = await this.gateway.call<Message>(`/connector/conversations/${message.conversationId}/messages`, { ...body, attachmentIds: message.attachmentIds ?? [], clientMessageId: key });
               messageId = created.id;
+              this.remember(key, created.text, created.revision);
               // A lost POST response may replay an older committed revision.
               needsPatch = !matches(created, message);
               if (needsPatch) this.state.createdOutgoing(key, messageId);
             }
-            if (needsPatch) await this.gateway.call(`/connector/messages/${messageId}`, {
-              text: message.text, streaming: message.streaming, ...(message.label ? { label: message.label } : {}),
-              ...(message.process ? { process: message.process } : {}), ...(message.runtimeActivity ? { runtimeActivity: message.runtimeActivity } : {}),
-            }, false, 'PATCH');
+            if (needsPatch) {
+              const fields = { streaming: message.streaming, ...(message.label ? { label: message.label } : {}),
+                ...(message.process ? { process: message.process } : {}), ...(message.runtimeActivity ? { runtimeActivity: message.runtimeActivity } : {}) };
+              const previous = this.acknowledged.get(key);
+              let result: { revision?: number } | undefined;
+              if (this.gateway.supportsMessageDeltas && previous) {
+                let prefix = 0;
+                while (prefix < previous.text.length && prefix < message.text.length && previous.text.charCodeAt(prefix) === message.text.charCodeAt(prefix)) prefix++;
+                try {
+                  result = await this.gateway.call(`/connector/messages/${messageId}`, { ...fields,
+                    delta: { baseRevision: previous.revision, prefix, tail: message.text.slice(prefix), patchId: stableKey(`${key}:${revision}`) } }, false, 'PATCH');
+                } catch (error) {
+                  const oldGateway = !this.gateway.supportsMessageDeltas && error instanceof GatewayError && [400, 415].includes(error.status);
+                  if (!oldGateway && !(error instanceof GatewayError && error.status === 409 && error.code === 'message_revision_mismatch')) throw error;
+                }
+              }
+              result ??= await this.gateway.call(`/connector/messages/${messageId}`, { ...fields, text: message.text }, false, 'PATCH');
+              this.remember(key, message.text, result?.revision);
+            }
             // A newer revision created during either request must remain dirty.
             this.state.sent(key, messageId, revision); sent++;
           } catch (error) {

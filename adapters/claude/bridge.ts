@@ -51,7 +51,7 @@ export class ClaudeBridge {
     return this.state.db.prepare('SELECT session_id FROM claude_sessions WHERE conversation_id=?').get(conversationId)?.session_id as string | undefined;
   }
   private emit(conversationId: string, key: string, text: string, kind: Outgoing['kind'] = 'system', streaming = false, attachmentIds?: string[]) {
-    this.state.put({ conversationId, key, text, kind, streaming, attachmentIds });
+    this.state.queue({ conversationId, key, text, kind, streaming, attachmentIds });
   }
   private async ack(delivery: Delivery, ok: boolean, error?: string) {
     await this.gateway.call(`/connector/deliveries/${delivery.id}/ack`, { ok, ...(error ? { error } : {}) });
@@ -285,7 +285,7 @@ export class ClaudeBridge {
   }
   stop() { this.stopped = true; this.transportAbort.abort(); this.management.stop(); for (const active of this.active.values()) { active.abort.abort(); active.query?.close(); } }
   async run() {
-    const outgoing = async () => { while (!this.stopped) { await this.flushOutgoing().catch(() => {}); await pause(500); } };
+    const outgoing = () => this.outgoing.run(this.transportAbort.signal);
     const polling = async () => {
       let failures = 0;
       while (!this.stopped) {

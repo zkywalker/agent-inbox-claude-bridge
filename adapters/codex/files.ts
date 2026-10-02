@@ -3,6 +3,7 @@ import { constants, type BigIntStats } from 'node:fs';
 import { open, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { Readable } from 'node:stream';
 import type { Attachment } from '../../shared/protocol.js';
 import { Gateway, GatewayError, safeProjectFile } from './gateway.js';
 import type { BridgeState, PublishedFile } from './state.js';
@@ -11,6 +12,7 @@ import type { FilePolicy, FileReferenceRequest } from '../../shared/file-referen
 import { safeReferenceFile } from './file-references.js';
 
 const chunkBytes = 8 * 1024 * 1024;
+export const FILE_FIRST_BLOCK_BYTES = 64 * 1024;
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 type Transfer = { id: string; attachmentId: string; method: 'GET' | 'HEAD'; policy?: FilePolicy };
 export interface FileTransferFailure {
@@ -40,6 +42,7 @@ const version = (info: BigIntStats) => [info.dev, info.ino, info.size, info.mtim
 export class OnlineFiles {
   private stopped = new AbortController();
   private tasks = new Map<string, Promise<void>>();
+  private transfers = new Map<string, AbortController>();
   readonly maxBytes: number;
   constructor(private gateway: Gateway, private state: BridgeState, private projects: Projects,
     private reportFailure: (event: FileTransferFailure) => void = event => console.error(`[codex-bridge] ${JSON.stringify(event)}`)) {
@@ -98,6 +101,9 @@ export class OnlineFiles {
   async transfer(request: Transfer): Promise<void> {
     if (!uuid.test(request.id) || !uuid.test(request.attachmentId) || !['HEAD', 'GET'].includes(request.method)) return;
     let handle: FileHandle | undefined;
+    const controller = new AbortController();
+    this.transfers.set(request.id, controller);
+    const signal = AbortSignal.any([this.stopped.signal, controller.signal]);
     const started = Date.now();
     let confirmedOffset = 0, blockBytes = 0, blockStarted = started;
     try {
@@ -107,32 +113,42 @@ export class OnlineFiles {
       if (request.method === 'HEAD' || file.size === 0) {
         const response = await this.gateway.raw(`/api/connector/file-transfers/${request.id}/content?offset=0`, {
           method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': '0' }, body: new Uint8Array(),
-          signal: AbortSignal.any([this.stopped.signal, AbortSignal.timeout(90_000)]),
+          signal: AbortSignal.any([signal, AbortSignal.timeout(90_000)]),
         });
         await response.body?.cancel(); return;
       }
-      // Keep at most one fixed-size chunk in memory, regardless of artifact size.
-      // A chunk is checked before sending; HTTP bodies stay below edge limits.
-      const buffer = Buffer.allocUnsafe(Math.min(chunkBytes, file.size));
+      // Small first block lowers first-byte latency. Later blocks amortize RTT,
+      // but their contents are read under fetch backpressure in bounded slices (at most 256 KiB).
       for (; confirmedOffset < file.size;) {
-        blockBytes = Math.min(buffer.length, file.size - confirmedOffset);
+        blockBytes = Math.min(confirmedOffset === 0 ? FILE_FIRST_BLOCK_BYTES : chunkBytes, file.size - confirmedOffset);
         blockStarted = Date.now();
-        this.stopped.signal.throwIfAborted();
+        signal.throwIfAborted();
         if (version(await handle.stat({ bigint: true })) !== file.version) throw new FileError('file_changed');
-        const length = blockBytes;
-        let read = 0;
-        while (read < length) {
-          const { bytesRead } = await handle.read(buffer, read, length - read, confirmedOffset + read);
-          if (!bytesRead) throw new FileError('file_changed');
-          read += bytesRead;
-        }
-        if (version(await handle.stat({ bigint: true })) !== file.version) throw new FileError('file_changed');
-        const response = await this.gateway.raw(`/api/connector/file-transfers/${request.id}/content?offset=${confirmedOffset}`, {
-          method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(length) },
-          body: new Uint8Array(buffer.buffer, buffer.byteOffset, length),
-          signal: AbortSignal.any([this.stopped.signal, AbortSignal.timeout(90_000)]),
-        });
-        await response.body?.cancel(); confirmedOffset += length;
+        const length = blockBytes, offset = confirmedOffset, source = handle;
+        let sourceError: unknown;
+        const input = Readable.from((async function* () {
+          try {
+          let read = 0;
+          while (read < length) {
+            signal.throwIfAborted();
+            const buffer = Buffer.allocUnsafe(Math.min(256 * 1024, length - read));
+            const { bytesRead } = await source.read(buffer, 0, buffer.length, offset + read);
+            if (!bytesRead) throw new FileError('file_changed');
+            read += bytesRead;
+            if (read === length && version(await source.stat({ bigint: true })) !== file.version) throw new FileError('file_changed');
+            yield buffer.subarray(0, bytesRead);
+          }
+          } catch (error) { sourceError = error; throw error; }
+        })(), { objectMode: false, highWaterMark: 64 * 1024 });
+        try {
+          const init: RequestInit & { duplex: 'half' } = {
+            method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(length) },
+            body: input as unknown as BodyInit, duplex: 'half',
+            signal: AbortSignal.any([signal, AbortSignal.timeout(90_000)]),
+          };
+          const response = await this.gateway.raw(`/api/connector/file-transfers/${request.id}/content?offset=${offset}`, init);
+          await response.body?.cancel(); confirmedOffset += length;
+        } catch (error) { throw sourceError ?? error; } finally { input.destroy(); }
       }
     } catch (error) {
       // Construct from fixed fields only: upstream errors can contain private paths,
@@ -145,11 +161,11 @@ export class OnlineFiles {
             ? { status: error.status } : { code: failureCode(error) }),
         });
       } catch { /* Diagnostics never change transfer cleanup or failure handling. */ }
-      if (this.stopped.signal.aborted || error instanceof GatewayError && [401, 403, 404, 409, 410].includes(error.status)) return;
+      if (signal.aborted || error instanceof GatewayError && [401, 403, 404, 409, 410].includes(error.status)) return;
       const code = error instanceof FileError ? error.code : (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'file_missing' : 'file_unavailable';
       // Only fixed public error codes cross the gateway; host paths stay local.
       await this.gateway.call(`/connector/file-transfers/${request.id}/error`, { code }).catch(() => {});
-    } finally { await handle?.close(); }
+    } finally { this.transfers.delete(request.id); await handle?.close(); }
   }
   async resolveReference(request: FileReferenceRequest) {
     if (!uuid.test(request.id) || !uuid.test(request.conversationId) || typeof request.path !== 'string' || request.path.length > 4096) return;
@@ -165,11 +181,14 @@ export class OnlineFiles {
   async run(onError: () => void) {
     while (!this.stopped.signal.aborted) {
       try {
-        const response = await this.gateway.raw('/api/connector/file-transfers?wait=20&references=1', {
+        const response = await this.gateway.raw('/api/connector/file-transfers?wait=20&references=1&cancellations=1', {
           signal: AbortSignal.any([this.stopped.signal, AbortSignal.timeout(28_000)]),
         });
-        const body = await response.json() as { transfers: Transfer[]; references?: FileReferenceRequest[] };
+        const body = await response.json() as { transfers: Transfer[]; references?: FileReferenceRequest[]; cancelled?: string[] };
         if (!Array.isArray(body.transfers)) throw new Error('Invalid transfer inbox');
+        for (const id of Array.isArray(body.cancelled) ? body.cancelled.slice(0, 128) : []) {
+          if (typeof id === 'string') this.transfers.get(id)?.abort();
+        }
         for (const request of (body.references ?? []).slice(0, 2)) {
           if (this.tasks.has(request.id)) continue;
           if (this.tasks.size >= 4) { await this.gateway.call(`/connector/file-references/${request.id}/result`, { error: 'file_unavailable' }).catch(() => {}); continue; }

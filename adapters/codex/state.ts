@@ -28,12 +28,18 @@ const processKey = (threadId: string, turnId: string) => stableKey(JSON.stringif
 
 export class BridgeState {
   readonly db: DatabaseSync;
+  private streamingOutput = new Set<string>();
+  private pendingOutput = new Map<string, Outgoing>();
+  private outputTimer?: ReturnType<typeof setTimeout>;
+  private outputListeners = new Set<() => void>();
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS inputs (message_id TEXT PRIMARY KEY, state TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS outgoing (key TEXT PRIMARY KEY, body TEXT NOT NULL, message_id TEXT, revision INTEGER NOT NULL, sent_revision INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS outgoing_text_deltas (seq INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, text TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS outgoing_text_keys ON outgoing_text_deltas(key,seq);
       CREATE TABLE IF NOT EXISTS outgoing_failures (key TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS outgoing_attempts (key TEXT PRIMARY KEY, attempted_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_reports (id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 1, sent_revision INTEGER NOT NULL DEFAULT 0, reported_at INTEGER NOT NULL DEFAULT 0);
@@ -56,7 +62,7 @@ export class BridgeState {
     }
     // Persisted streams must not stay spinning after the child has gone.
     for (const row of this.db.prepare('SELECT key,body FROM outgoing').all()) {
-      const message: Outgoing = JSON.parse(row.body as string);
+      const message = this.materialize(row.key as string, row.body as string);
       if (message.streaming) this.put({ ...message, streaming: false });
     }
   }
@@ -102,13 +108,65 @@ export class BridgeState {
   input(id: string): string | undefined { return this.db.prepare('SELECT state FROM inputs WHERE message_id=?').get(id)?.state as string | undefined; }
   markInput(id: string, state: string) { this.db.prepare('INSERT INTO inputs VALUES(?,?) ON CONFLICT(message_id) DO UPDATE SET state=excluded.state').run(id, state); }
   outgoing(key: string): Outgoing | undefined {
+    if (this.pendingOutput.has(key)) return this.pendingOutput.get(key);
     const row = this.db.prepare('SELECT body FROM outgoing WHERE key=?').get(stableKey(key));
-    return row ? JSON.parse(row.body as string) : undefined;
+    return row ? this.materialize(stableKey(key), row.body as string) : undefined;
+  }
+  private materialize(key: string, body: string): Outgoing {
+    const message: Outgoing = JSON.parse(body);
+    const tails = this.db.prepare('SELECT text FROM outgoing_text_deltas WHERE key=? ORDER BY seq').all(key);
+    if (tails.length) message.text += tails.map(row => row.text as string).join('');
+    return message;
+  }
+  subscribeOutgoing(listener: () => void) { this.outputListeners.add(listener); return () => { this.outputListeners.delete(listener); }; }
+  private outputChanged() { for (const listener of this.outputListeners) listener(); }
+  /** First output and completion commit immediately; only unpublished text is coalesced. */
+  queue(message: Outgoing) {
+    if (!message.streaming || !this.streamingOutput.has(message.key)) { this.put(message); return; }
+    this.pendingOutput.set(message.key, message);
+    let size = 0;
+    for (const pending of this.pendingOutput.values()) size += pending.text.length;
+    if (this.pendingOutput.size >= 64 || size >= 1024 * 1024) { this.flushBuffered(); return; }
+    if (!this.outputTimer) this.outputTimer = setTimeout(() => {
+      this.outputTimer = undefined;
+      try { this.flushBuffered(); } catch { this.outputChanged(); }
+    }, 120);
+  }
+  flushBuffered() {
+    clearTimeout(this.outputTimer); this.outputTimer = undefined;
+    if (!this.pendingOutput.size) return;
+    const messages = [...this.pendingOutput.values()];
+    this.db.exec('SAVEPOINT outgoing_batch');
+    try {
+      for (let message of messages) {
+        if (message.process) message = { ...message, process: this.process(message.process.id) ?? message.process };
+        const key = stableKey(message.key), row = this.db.prepare('SELECT body FROM outgoing WHERE key=?').get(key);
+        const base: Outgoing | undefined = row ? JSON.parse(row.body as string) : undefined;
+        const previous = row ? this.materialize(key, row.body as string) : undefined;
+        if (base && previous && message.text.startsWith(previous.text) && message.text.length - base.text.length < 64 * 1024 && Number(this.db.prepare('SELECT COUNT(*) AS n FROM outgoing_text_deltas WHERE key=?').get(key)?.n) < 128) {
+          if (message.text.length > previous.text.length) this.db.prepare('INSERT INTO outgoing_text_deltas(key,text) VALUES(?,?)').run(key, message.text.slice(previous.text.length));
+          this.db.prepare('UPDATE outgoing SET body=?,revision=revision+1 WHERE key=?').run(JSON.stringify({ ...message, text: base.text }), key);
+        } else this.persistOutput(message);
+      }
+      this.db.exec('RELEASE outgoing_batch');
+      this.pendingOutput.clear();
+    } catch (error) { this.db.exec('ROLLBACK TO outgoing_batch; RELEASE outgoing_batch'); throw error; }
+    this.outputChanged();
   }
   put(message: Outgoing) {
     // A delayed item update must use the current durable lifecycle state.
     if (message.process) message = { ...message, process: this.process(message.process.id) ?? message.process };
+    this.db.exec('SAVEPOINT outgoing_put');
+    try { this.persistOutput(message); this.db.exec('RELEASE outgoing_put'); this.pendingOutput.delete(message.key);
+      this.streamingOutput.delete(message.key);
+      if (message.streaming) this.streamingOutput.add(message.key);
+      if (this.streamingOutput.size > 256) this.streamingOutput.delete(this.streamingOutput.values().next().value!); }
+    catch (error) { this.db.exec('ROLLBACK TO outgoing_put; RELEASE outgoing_put'); throw error; }
+    this.outputChanged();
+  }
+  private persistOutput(message: Outgoing) {
     this.db.prepare('INSERT INTO outgoing(key,body,revision) VALUES(?,?,1) ON CONFLICT(key) DO UPDATE SET body=excluded.body,revision=outgoing.revision+1').run(stableKey(message.key), JSON.stringify(message));
+    this.db.prepare('DELETE FROM outgoing_text_deltas WHERE key=?').run(stableKey(message.key));
   }
   process(id: string): MessageProcess | undefined {
     const row = this.db.prepare('SELECT body FROM processes WHERE id=?').get(id);
@@ -150,13 +208,14 @@ export class BridgeState {
     this.saveProcess({ ...prior, state, ...(completedAt ? { completedAt } : {}), ...(summary ? { summary } : {}) });
   }
   private saveProcess(process: MessageProcess) {
+    this.flushBuffered();
     // Commit the lifecycle and every pending/published record together, including
     // records outside the outbox's current upload batch or the browser's page.
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare('UPDATE processes SET body=? WHERE id=?').run(JSON.stringify(process), process.id);
       for (const row of this.db.prepare("SELECT body FROM outgoing WHERE json_extract(body,'$.process.id')=?").all(process.id))
-        this.put({ ...JSON.parse(row.body as string), process });
+        this.put({ ...this.outgoing((JSON.parse(row.body as string) as Outgoing).key)!, process });
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
@@ -169,14 +228,25 @@ export class BridgeState {
       WHERE o.revision>o.sent_revision AND (f.key IS NULL OR
         (COALESCE(json_extract(f.body,'$.blocked'),0)=0 AND json_extract(f.body,'$.retryAt')<=?) OR
         (json_extract(f.body,'$.blocked')=1 AND json_extract(f.body,'$.revision')<>o.revision)))
-      SELECT * FROM eligible ORDER BY topic_position,attempted_at,row_order LIMIT 30`).all(at);
+      SELECT * FROM eligible ORDER BY topic_position,attempted_at,row_order LIMIT 30`).all(at)
+      .map(row => ({ ...row, body: JSON.stringify(this.materialize(row.key as string, row.body as string)) } as Record<string, any>));
+  }
+  nextOutgoingDelay(at = Date.now()): number | undefined {
+    if (this.pendingOutput.size) return 120;
+    const auth = this.tool('outgoing:authentication');
+    if (auth?.retryAt > at) return auth.retryAt - at;
+    const row = this.db.prepare(`SELECT MIN(CASE WHEN f.key IS NULL OR json_extract(f.body,'$.revision')<>o.revision AND json_extract(f.body,'$.blocked')=1 THEN ? ELSE json_extract(f.body,'$.retryAt') END) AS next
+      FROM outgoing o LEFT JOIN outgoing_failures f ON f.key=o.key WHERE o.revision>o.sent_revision
+      AND (f.key IS NULL OR json_extract(f.body,'$.blocked')=0 OR json_extract(f.body,'$.revision')<>o.revision)`).get(at);
+    return row?.next == null ? undefined : Math.max(0, Number(row.next) - at);
   }
   attemptedOutgoing(key: string, at: number) { this.db.prepare('INSERT INTO outgoing_attempts VALUES(?,?) ON CONFLICT(key) DO UPDATE SET attempted_at=excluded.attempted_at').run(key, at); }
   outgoingFailure(key: string): OutgoingFailure | undefined { const row = this.db.prepare('SELECT body FROM outgoing_failures WHERE key=?').get(key); return row ? JSON.parse(row.body as string) : undefined; }
   failOutgoing(key: string, failure: OutgoingFailure) { this.db.prepare('INSERT INTO outgoing_failures VALUES(?,?) ON CONFLICT(key) DO UPDATE SET body=excluded.body').run(key, JSON.stringify(failure)); }
   createdOutgoing(key: string, messageId: string) { this.db.prepare('UPDATE outgoing SET message_id=? WHERE key=?').run(messageId, key); }
   finishStreams(conversationId: string) {
-    for (const row of this.db.prepare("SELECT body FROM outgoing WHERE json_extract(body,'$.conversationId')=? AND json_extract(body,'$.streaming')=1").all(conversationId)) this.put({ ...JSON.parse(row.body as string), streaming: false });
+    this.flushBuffered();
+    for (const row of this.db.prepare("SELECT body FROM outgoing WHERE json_extract(body,'$.conversationId')=? AND json_extract(body,'$.streaming')=1").all(conversationId)) this.put({ ...this.outgoing((JSON.parse(row.body as string) as Outgoing).key)!, streaming: false });
   }
   sent(key: string, messageId: string, revision: number) {
     this.db.prepare('UPDATE outgoing SET message_id=?,sent_revision=MAX(sent_revision,?) WHERE key=?').run(messageId, revision, key);
@@ -195,5 +265,14 @@ export class BridgeState {
   saveFile(key: string, file: PublishedFile) {
     this.db.prepare('INSERT INTO published_files VALUES(?,?) ON CONFLICT(call_key) DO UPDATE SET body=excluded.body').run(stableKey(key), JSON.stringify(file));
   }
-  close() { this.db.close(); }
+  /** Graceful shutdown leaves full snapshots readable by earlier Bridge builds. */
+  private compactOutput() {
+    this.db.exec('SAVEPOINT outgoing_compact');
+    try {
+      const rows = this.db.prepare('SELECT key,body FROM outgoing WHERE key IN (SELECT key FROM outgoing_text_deltas)').all();
+      for (const row of rows) this.db.prepare('UPDATE outgoing SET body=? WHERE key=?').run(JSON.stringify(this.materialize(row.key as string, row.body as string)), row.key);
+      this.db.exec('DELETE FROM outgoing_text_deltas; RELEASE outgoing_compact');
+    } catch (error) { this.db.exec('ROLLBACK TO outgoing_compact; RELEASE outgoing_compact'); throw error; }
+  }
+  close() { this.flushBuffered(); this.compactOutput(); clearTimeout(this.outputTimer); this.outputListeners.clear(); this.db.close(); }
 }

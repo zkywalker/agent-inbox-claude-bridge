@@ -24,6 +24,7 @@ export class GatewayError extends Error {
   constructor(readonly status: number, readonly code: string) { super(`Inbox request failed (${status}, ${code})`); }
 }
 export class Gateway {
+  supportsMessageDeltas = false;
   onHealth?: (event: HostEvent) => void;
   private inboxPollId = randomUUID();
   readonly base: URL;
@@ -48,6 +49,9 @@ export class Gateway {
     const endpoint = path.split('?')[0].replace(/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/gi, ':id');
     try { response = await fetch(new URL(path, this.base), { ...init, headers, redirect: 'error', signal: init.signal ?? AbortSignal.timeout(28_000) }); }
     catch (error) { if (init.signal?.aborted) throw error; this.onHealth?.({ component: 'gateway', code: 'gateway_unreachable', scope, endpoint }); throw new GatewayError(503, 'gateway_unreachable'); }
+    if (init.method === 'POST' && /^\/api\/connector\/conversations\/[^/]+\/messages$/.test(path) || init.method === 'PATCH' && path.startsWith('/api/connector/messages/')) {
+      this.supportsMessageDeltas = response.headers.get('x-inbox-message-delta') === 'v1';
+    }
     if (!response.ok) {
       const body: any = await response.json().catch(() => ({}));
       if ([401, 403].includes(response.status)) this.onHealth?.({ component: 'gateway', code: 'auth_failed', scope, endpoint });

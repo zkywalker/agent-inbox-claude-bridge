@@ -46,6 +46,18 @@
         "shared/protocol.ts": "c64cb5bcf8f55fd471c023a4af9aa9e9b985d69b1765265f5025d22f0e16818e"
       },
       "upstreamCommit": "2c36c7de10e85af355574f1408e9e4763196724a"
+    },
+    {
+      "at": "2026-10-02T14:20:16.242036+00:00",
+      "upstreamBase": "7730138fb14b03638c466c431b85c97f465e62b5",
+      "note": "Export committed durable coalesced output, negotiated delta delivery and bounded cancellable file streaming. Preserve independent signed updater and host lifecycle.",
+      "files": {
+        "adapters/codex/state.ts": "a54d150e9018e408267f0e5fa27d22a10f593617fc5720ef299b4a9293f7ca3b",
+        "adapters/codex/outgoing.ts": "73a4e5a77f23eadf452858316cd31c38fc6c9d4e32848de50e1e6cb24fd1f085",
+        "adapters/codex/files.ts": "5026cc83ba76a38a287986af69bfe4bedf45c55146c350753b5212488cabe27a",
+        "adapters/codex/gateway.ts": "9dbdcb290390d49b2a497fcb03a9c596a138ee4d577080821dfe89bca7195d11",
+        "adapters/claude/bridge.ts": "1119dda2d7c4ab1b84bf6a968ec578c498d11844efa17810d015b07e4e2e2ffb"
+      }
     }
   ]
 }
