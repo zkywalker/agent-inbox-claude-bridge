@@ -52,6 +52,18 @@ export interface Attachment {
 }
 export type DeliveryStatus = "received" | "sending" | "delivered" | "failed";
 export type MessageKind = "chat" | "activity" | "system";
+export interface CodingInputSelection {
+  mode: 'queue' | 'steer';
+  skillIds: string[];
+  /** Display snapshot only; native resolution always uses skillIds. */
+  skillNames?: string[];
+  expectedTurnId?: string;
+}
+export interface CodingInput extends CodingInputSelection {
+  nativeAccepted?: boolean;
+  state: 'queued' | 'dispatching' | 'accepted' | 'running' | 'completed' | 'interrupted' | 'failed' | 'uncertain' | 'cancelled';
+  turnId?: string;
+}
 export interface RuntimeActivity {
   id: string;
   category: 'skill' | 'task' | 'tool' | 'request';
@@ -107,6 +119,7 @@ export interface Message {
   process?: MessageProcess;
   runtimeActivity?: RuntimeActivity;
   codexApprovalId?: string;
+  input?: CodingInput;
 }
 export interface Delivery {
   id: string;

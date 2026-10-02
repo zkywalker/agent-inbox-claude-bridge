@@ -25,6 +25,8 @@ export class GatewayError extends Error {
 }
 export class Gateway {
   supportsMessageDeltas = false;
+  supportsCodingInput = false;
+  private queueClaims = new Map<string, string>();
   onHealth?: (event: HostEvent) => void;
   private inboxPollId = randomUUID();
   readonly base: URL;
@@ -69,16 +71,26 @@ export class Gateway {
     if (!response.headers.get('content-type')?.includes('application/json')) { this.onHealth?.({ component: 'gateway', code: 'auth_failed', scope: management ? 'management' : 'message', endpoint: `/api${path}`.split('?')[0].replace(/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/gi, ':id') }); throw new GatewayError(401, 'access_login_required'); }
     return response.json() as Promise<T>;
   }
-  async pollInbox(options: { signal?: AbortSignal; claudeInstanceId?: string } = {}): Promise<{ deliveries: Delivery[] }> {
+  async pollInbox(options: { signal?: AbortSignal; claudeInstanceId?: string; codingInstanceId?: string } = {}): Promise<{ deliveries: Delivery[] }> {
     // Keep this key only while recovering a response that never reached the
     // input handler. It is deliberately not persisted across process restarts.
     const query = new URLSearchParams({ wait: '20', pollId: this.inboxPollId });
     if (options.claudeInstanceId) query.set('claudeInstanceId', options.claudeInstanceId);
+    if (this.supportsCodingInput && options.codingInstanceId) query.set('codingInstanceId', options.codingInstanceId);
     const result = await this.call<unknown>(`/connector/inbox?${query}`, undefined, false, undefined, options.signal);
     if (!validInbox(result)) throw new GatewayError(502, 'invalid_inbox_response');
     // Rotate before the caller can submit any native input or send an ACK.
     this.inboxPollId = randomUUID();
     return result;
+  }
+  pendingQueuedTopics() { return [...this.queueClaims.keys()]; }
+  async claimQueued(conversationId: string, instanceId: string): Promise<Delivery | null> {
+    const clientRequestId = this.queueClaims.get(conversationId) ?? randomUUID();
+    this.queueClaims.set(conversationId, clientRequestId);
+    const result = await this.call<{ delivery: Delivery | null }>('/connector/coding/queue/claim', { conversationId, instanceId, clientRequestId }, true);
+    if (result.delivery !== null && !validInbox({ protocolVersion: PROTOCOL_VERSION, deliveries: [result.delivery] })) throw new GatewayError(502, 'invalid_inbox_response');
+    this.queueClaims.delete(conversationId);
+    return result.delivery;
   }
   async download(attachment: Attachment, conversationId: string): Promise<string> {
     if (!/^[a-f0-9-]{36}$/.test(attachment.id) || !/^[a-f0-9-]{36}$/.test(conversationId) || attachment.size > this.maxFileBytes) throw new Error('Attachment is invalid or exceeds size limit');

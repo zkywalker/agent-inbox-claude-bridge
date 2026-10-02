@@ -1,6 +1,8 @@
 export interface CodexProject { id: string; name: string; path?: string; host?: string }
 export type CodexSessionState = 'idle' | 'running' | 'waiting' | 'interrupted' | 'failed' | 'unknown';
 export interface CodexSession {
+  inputMessageIds?: string[];
+  inputUncertain?: boolean;
   conversationId: string;
   projectId: string;
   threadId: string | null;
@@ -15,6 +17,9 @@ export interface CodexQuestion {
 }
 export type CodexApprovalResolution = 'approved' | 'rejected' | 'timed-out' | 'cancelled';
 export interface CodexApproval {
+  /** Nonblocking questions remain answerable across turns of the same thread. */
+  blocking?: boolean;
+  source?: 'rpc' | 'agent-message';
   scope?: 'once' | 'turn';
   id: string; conversationId: string; threadId: string; turnId: string;
   kind: 'command' | 'file-change' | 'permissions' | 'user-input';
@@ -31,6 +36,8 @@ export interface CodexAction {
   error: string | null;
 }
 export interface CodexView {
+  inputCapabilities?: { queue: boolean; skills: boolean };
+  inputQueue?: { paused: boolean; messages: import('./protocol.js').Message[] };
   enabled: boolean; online: boolean; version: string | null;
   account: 'apiKey' | 'chatgpt' | 'external' | 'missing' | 'unknown';
   projects: CodexProject[]; session: CodexSession | null; approvals: CodexApproval[];

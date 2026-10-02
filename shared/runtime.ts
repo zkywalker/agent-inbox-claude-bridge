@@ -100,7 +100,7 @@ export interface RuntimeReport {
   conversationId: string | null;
   runtimeVersion: string | null;
   bridgeVersion?: string | null;
-  capabilities: { inspect: boolean; switchModel: boolean; syncConnections: boolean; readFiles: boolean; reasoning?: boolean; manageProjects?: boolean; updateSettings?: boolean; manageSkills?: boolean; manageMcp?: boolean; initialSelection?: boolean; defaultsWhileBusy?: boolean; claudeBypassPermissions?: boolean };
+  capabilities: { inspect: boolean; switchModel: boolean; syncConnections: boolean; readFiles: boolean; reasoning?: boolean; manageProjects?: boolean; updateSettings?: boolean; manageSkills?: boolean; manageMcp?: boolean; initialSelection?: boolean; defaultsWhileBusy?: boolean; claudeBypassPermissions?: boolean; inputQueue?: boolean; inputSkills?: boolean; asyncQuestions?: boolean };
   codex?: CodexSettingsReport;
   codexUpdate?: CodexUpdateInfo;
   bridgeUpdate?: BridgeUpdateInfo;
@@ -127,7 +127,7 @@ export interface RuntimeReport {
   files: { id: string; name: string; source: string; loaded: boolean | null }[];
 }
 
-export type RuntimeRequestKind = 'inspect' | 'switch-model' | 'read-file' | 'browse-projects' | 'register-project' | 'update-settings' | 'update-claude-settings' | 'set-skill' | 'set-mcp' | 'reload-mcp' | 'update-codex' | 'update-claude' | 'update-bridge';
+export type RuntimeRequestKind = 'input-skills' | 'inspect' | 'switch-model' | 'read-file' | 'browse-projects' | 'register-project' | 'update-settings' | 'update-claude-settings' | 'set-skill' | 'set-mcp' | 'reload-mcp' | 'update-codex' | 'update-claude' | 'update-bridge';
 export type RuntimeRequestStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'uncertain';
 export interface RuntimeRequest {
   bridgeRelease?: BridgeUpdatePlan;
@@ -135,10 +135,10 @@ export interface RuntimeRequest {
   agentId: string;
   conversationId: string | null;
   kind: RuntimeRequestKind;
-  payload: { choiceId?: string; fileId?: string; effort?: string; directoryId?: string; name?: string; settings?: CodexOptions; claudeSettings?: ClaudeSettings; targetId?: string; enabled?: boolean; targetVersion?: string };
+  payload: { projectId?: string; choiceId?: string; fileId?: string; effort?: string; directoryId?: string; name?: string; settings?: CodexOptions; claudeSettings?: ClaudeSettings; targetId?: string; enabled?: boolean; targetVersion?: string };
   status: RuntimeRequestStatus;
   error: string | null;
-  result: { file?: { name: string; text: string; truncated: boolean; source: string }; listing?: ProjectListing; project?: { id: string; name: string; path: string } } | null;
+  result: { skills?: NonNullable<RuntimeReport['skills']>; file?: { name: string; text: string; truncated: boolean; source: string }; listing?: ProjectListing; project?: { id: string; name: string; path: string } } | null;
   createdAt: string;
   updatedAt: string;
 }

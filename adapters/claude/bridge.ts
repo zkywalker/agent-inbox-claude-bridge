@@ -35,7 +35,7 @@ export class ClaudeBridge {
     state.db.exec('CREATE TABLE IF NOT EXISTS claude_sessions (conversation_id TEXT PRIMARY KEY, session_id TEXT NOT NULL); CREATE TABLE IF NOT EXISTS claude_identity (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
     this.bindIdentity('project', config.projectPath);
     this.bindIdentity('gateway', this.gateway.base.origin);
-    this.management = new ClaudeManagement(config, this.gateway, state, { busy: id => id ? this.active.has(id) : !!this.active.size, control: action => this.control(action) });
+    this.management = new ClaudeManagement(config, this.gateway, state, { busy: id => id ? this.active.has(id) : !!this.active.size, control: action => this.control(action), queue: id => this.acceptQueued(id) });
     for (const row of state.db.prepare("SELECT body FROM outgoing WHERE json_extract(body,'$.runtimeActivity.state') IN ('running','retrying','limited')").all()) {
       const message: Outgoing = JSON.parse(row.body as string);
       state.put({ ...message, text: `${message.text}\nBridge 已重启，此项结果待确认。`, runtimeActivity: { ...message.runtimeActivity!, state: 'unknown', updatedAt: new Date().toISOString() } });
@@ -53,17 +53,32 @@ export class ClaudeBridge {
   private emit(conversationId: string, key: string, text: string, kind: Outgoing['kind'] = 'system', streaming = false, attachmentIds?: string[]) {
     this.state.queue({ conversationId, key, text, kind, streaming, attachmentIds });
   }
-  private async ack(delivery: Delivery, ok: boolean, error?: string) {
-    await this.gateway.call(`/connector/deliveries/${delivery.id}/ack`, { ok, ...(error ? { error } : {}) });
+  private async ack(delivery: Delivery, ok: boolean, error?: string, uncertain = false) {
+    await this.gateway.call(`/connector/deliveries/${delivery.id}/ack`, { ok, ...(error ? { error } : {}), ...(delivery.message.input && uncertain ? { uncertain: true } : {}) });
   }
-  async accept(delivery: Delivery) {
+  private inputLock: Promise<void> = Promise.resolve();
+  private serializedInput(run: () => Promise<void>) {
+    const next = this.inputLock.then(run); this.inputLock = next.catch(() => {}); return next;
+  }
+  async acceptQueued(conversationId: string) {
+    return this.serializedInput(async () => {
+    if (!this.management.ready || this.management.maintenance || this.active.has(conversationId) || this.active.size >= this.config.maxConcurrentTopics) return;
+    const session = this.management.session(conversationId);
+    if (session && !['idle','failed','interrupted'].includes(session.state)) return;
+    const delivery = await this.gateway.claimQueued(conversationId, this.management.instanceId);
+    if (delivery) await this.acceptInput(delivery);
+    });
+  }
+  async accept(delivery: Delivery) { return this.serializedInput(() => this.acceptInput(delivery)); }
+  private async acceptInput(delivery: Delivery) {
     const conversationId = delivery.conversation.id, inputId = delivery.message.id;
     const prior = this.state.input(inputId);
     if (prior && prior !== 'failed') {
       const ok = prior === 'accepted' || prior === 'done';
-      await this.ack(delivery, ok, ok ? undefined : 'Previous input is uncertain; inspect replies and send a new message to continue'); return;
+      await this.ack(delivery, ok, ok ? undefined : 'Previous input is uncertain; inspect replies and send a new message to continue', !ok); return;
     }
     const text = delivery.message.text.trim();
+    if (delivery.message.input && (delivery.message.input.mode !== 'queue' || delivery.message.input.skillIds.length)) { await this.ack(delivery, false, '此 Claude 运行端不支持当前输入选项。'); return; }
     const decision = /^\/(approve|deny) ([a-f0-9-]{36})$/.exec(text);
     if (decision) {
       const approval = this.approvals.get(decision[2]);
@@ -212,6 +227,7 @@ export class ClaudeBridge {
         session = { conversationId, projectId, threadId: this.session(conversationId) ?? null, turnId: null, state: 'idle', error: null, ...snapshot };
       }
       const managedOptions = this.initialized ? this.management.options(session) : {};
+      session.inputMessageIds = [];
       session.state = 'running'; session.turnId = randomUUID(); session.error = null; this.state.save(session);
       const attachments = [];
       for (const attachment of delivery.message.attachments) attachments.push({ name: attachment.name, path: await this.gateway.download(attachment, conversationId) });
@@ -235,6 +251,7 @@ export class ClaudeBridge {
         if (event.type === 'system' && event.subtype === 'init') {
           clearTimeout(startupTimer);
           this.state.db.prepare('INSERT INTO claude_sessions VALUES(?,?) ON CONFLICT(conversation_id) DO UPDATE SET session_id=excluded.session_id').run(conversationId, event.session_id);
+          session.inputMessageIds = delivery.message.input ? [inputId] : [];
           session.threadId = event.session_id; session.lastUsedModel = event.model; this.state.save(session); await this.management.publishSession(session);
           this.state.markInput(inputId, 'accepted'); accepted = true;
           await this.ack(delivery, true);
@@ -262,10 +279,10 @@ export class ClaudeBridge {
       }
       if (!completed) throw new Error('Runtime ended without result');
     } catch {
-      if (session) { session.state = active.abort.signal.aborted ? 'interrupted' : 'failed'; session.error = '原生调用未成功；请核对连接、模型与权限。'; this.state.save(session); }
+      if (session) { session.state = active.abort.signal.aborted ? 'interrupted' : active.query ? 'unknown' : 'failed'; session.error = '原生调用未成功；请核对连接、模型与权限。'; this.state.save(session); }
       this.state.markInput(inputId, active.query ? 'uncertain' : 'failed');
       this.emit(conversationId, `${inputId}:error`, active.abort.signal.aborted ? '任务已中断，未自动重放输入。' : 'Claude 连接或运行失败，结果可能不确定。请检查主机配置及已有回复后发送新消息继续。');
-      if (!accepted) await this.ack(delivery, false, 'Claude did not confirm startup').catch(() => {});
+      if (!accepted) await this.ack(delivery, false, 'Claude did not confirm startup', !!active.query).catch(() => {});
     } finally {
       activity.finish(active.abort.signal.aborted);
       clearTimeout(startupTimer);
@@ -290,7 +307,7 @@ export class ClaudeBridge {
       let failures = 0;
       while (!this.stopped) {
         try {
-          const inbox = await this.gateway.pollInbox({ claudeInstanceId: this.management.instanceId, signal: this.transportAbort.signal });
+          const inbox = await this.gateway.pollInbox({ claudeInstanceId: this.management.instanceId, codingInstanceId: this.management.instanceId, signal: this.transportAbort.signal });
           failures = 0;
           for (const delivery of inbox.deliveries) { if (this.stopped) break; await this.accept(delivery); }
         } catch (error) {

@@ -16,7 +16,7 @@ import { MessagesProxy, type ProxyConnection } from './messages-proxy.js';
 import { messagesBaseUrl, providerEnvironment, type ClaudeConfig } from './config.js';
 import { verifyClaudeBinary } from './runtime.js';
 
-interface Host { busy: (conversationId?: string) => boolean; control: (action: CodexAction) => Promise<void> }
+interface Host { busy: (conversationId?: string) => boolean; control: (action: CodexAction) => Promise<void>; queue?: (conversationId: string) => Promise<void> }
 const unknownUsage: RuntimeReport['usage'] = { contextTokens: null, contextLimit: null, inputTokens: null, outputTokens: null, cacheReadTokens: null, contextSource: 'unknown', totalsSource: 'unknown' };
 // These are configurable adapter parameters, not a probe of upstream model support.
 const reasoningEfforts = [
@@ -91,7 +91,8 @@ export class ClaudeManagement {
   }
   private async register() {
     if (this.registration) return this.registration;
-    this.registration = this.gateway.call('/connector/coding/connect', { instanceId: this.instanceId, version: this.version, account: this.connections.length ? 'apiKey' : 'unknown', projects: this.projectConfig.projects.map(project => ({ ...project, host: hostname() })) }, true).then(() => {
+    this.registration = this.gateway.call('/connector/coding/connect', { instanceId: this.instanceId, version: this.version, account: this.connections.length ? 'apiKey' : 'unknown', projects: this.projectConfig.projects.map(project => ({ ...project, host: hostname() })) }, true).then(response => {
+      this.gateway.supportsCodingInput = response.codingInput === true;
       this.registered = true; this.lastRegisteredAt = Date.now();
     }).finally(() => { this.registration = undefined; });
     return this.registration;
@@ -189,7 +190,7 @@ export class ClaudeManagement {
     const provider = configured.provider;
     return {
       conversationId, claudeInstanceId: this.instanceId, maintenance: this.maintenance, runtimeVersion: this.version === 'unknown' ? null : this.version,
-      capabilities: { inspect: true, switchModel: true, syncConnections: true, readFiles: true, reasoning: true, initialSelection: true, defaultsWhileBusy: true, claudeBypassPermissions: true, updateSettings: true, manageProjects: this.projects.enabled, manageSkills: true, manageMcp: true },
+      capabilities: { ...(this.gateway.supportsCodingInput ? { inputQueue: true } : {}), inspect: true, switchModel: true, syncConnections: true, readFiles: true, reasoning: true, initialSelection: true, defaultsWhileBusy: true, claudeBypassPermissions: true, updateSettings: true, manageProjects: this.projects.enabled, manageSkills: true, manageMcp: true },
       reasoning: { effort: settings.effort ?? null },
       claude: { settings, source: 'configuration', conversion: selection.connection?.apiMode === 'chat_completions' || selection.connection?.apiMode === 'responses' ? selection.connection.apiMode : 'native' },
       claudeUpdate: this.update,
@@ -220,7 +221,7 @@ export class ClaudeManagement {
       const revision = this.state.sessionRevision(id), previous = this.state.sessionReport(id);
       if (previous && Number(previous.sent_revision) === revision) return;
       const report = this.report(id);
-      const snapshot: CodexSession = { conversationId: id, projectId: session.projectId, threadId: session.threadId, turnId: session.turnId, state: session.state, model: session.model, error: session.error, environment: report.environment };
+      const snapshot: CodexSession = { ...(session.inputMessageIds?.length ? { inputMessageIds: session.inputMessageIds } : {}), conversationId: id, projectId: session.projectId, threadId: session.threadId, turnId: session.turnId, state: session.state, model: session.model, error: session.error, environment: report.environment };
       await this.gateway.call('/connector/coding/session', { instanceId: this.instanceId, session: snapshot }, true);
       await this.gateway.call('/connector/runtime/report', report, true);
       this.state.reportedSession(id, revision, Date.now());
@@ -394,7 +395,7 @@ export class ClaudeManagement {
       await this.waitForAuthentication(); if (this.stopped) break;
       try {
         if (!this.registered) await this.register();
-        const controls = await this.gateway.call('/connector/coding/inbox?instanceId=' + this.instanceId + '&wait=20', undefined, true, undefined, this.abort.signal);
+        const controls = await this.gateway.call('/connector/coding/inbox?instanceId=' + this.instanceId + '&wait=20' + (this.gateway.supportsCodingInput ? '&inputQueue=1' : ''), undefined, true, undefined, this.abort.signal);
         if (this.stopped) break;
         for (const action of controls.actions as CodexAction[]) {
           const key = `claude:control:${action.id}`, prior = this.state.tool(key);
@@ -407,6 +408,7 @@ export class ClaudeManagement {
           await this.gateway.call(`/connector/coding/actions/${action.id}/result`, { ...outcome, instanceId: this.instanceId }, true);
         }
         // Older gateways may ignore wait; avoid turning compatibility into a busy loop.
+        for (const topic of new Set([...this.gateway.pendingQueuedTopics(), ...(controls.queuedTopics ?? [])])) await this.host.queue?.(topic);
         if (!controls.actions.length) await this.wait(1000);
       } catch (error) { if (!this.stopped) await this.wait(this.retryDelay(error)); }
     }
