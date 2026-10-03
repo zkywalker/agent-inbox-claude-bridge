@@ -58,6 +58,21 @@
         "adapters/codex/gateway.ts": "9dbdcb290390d49b2a497fcb03a9c596a138ee4d577080821dfe89bca7195d11",
         "adapters/claude/bridge.ts": "1119dda2d7c4ab1b84bf6a968ec578c498d11844efa17810d015b07e4e2e2ffb"
       }
+    },
+    {
+      "at": "2026-10-03",
+      "baseRelease": "v0.1.7",
+      "featureCommit": "9fbe7bef87054d4a372e8cc4538c976d55d7ed6e",
+      "upstreamCommit": "e46ba06",
+      "note": "Durable next-turn input queues preserve the native Claude session and stop consumption on uncertain outcomes. Claude advertises queue support only; native Skill selection is not advertised.",
+      "files": {
+        "adapters/claude/bridge.ts": "ac12616aaf1c648d3a895331f449e6b30448e210530bab043320b030520ebf26",
+        "adapters/claude/management.ts": "2f046668724ce84cf026b384cf17bc5f7b41b864bd90af58cdefc22a94fa3682",
+        "adapters/codex/gateway.ts": "985d614ae7b9158fb0390d08f1dba508a3fde0efcc4d56fbd313ed8bf48b54a2",
+        "shared/codex.ts": "f629a2809d222986393c697a8e83f059ba1303b4392f24a55dd48744b5b61d72",
+        "shared/protocol.ts": "15fb1a6d37837b64d8df936c2328de2bdd70181cfd8a162c9bba7a31645f03f4",
+        "shared/runtime.ts": "9d515ddb74dd74393e65fc1c1fe430f78fc081bafed0aa7841d4f43ee48be4d0"
+      }
     }
   ]
 }

@@ -1,5 +1,11 @@
 # 发布契约
 
+## Coding input release 0.1.8
+
+Durable next-turn input queues preserve the native Claude session and stop consumption on uncertain outcomes. Claude advertises queue support only; native Skill selection is not advertised.
+
+Requires the gateway coding-input routes and persistent queue storage. A fresh instance report enables the matching controls. Local regression tests are simulated; release installation and real native model acceptance are recorded separately. Install only after confirming the target is idle and preserving its state.
+
 仓库固定为 `zkywalker/agent-inbox-claude-bridge`。稳定标签 `vMAJOR.MINOR.PATCH` 触发三平台构建，所有平台均须通过类型检查、离线测试、编译、生产依赖安装和打包后 CLI 配置验收。
 
 Actions 均固定完整提交 SHA。PR/普通 CI 无签名权限；build job 只有用于产物来源证明的 OIDC 权限。签名发布 job 进入受保护 `release` environment，由 Owner 审批；标签限制为 `v*`，不绕过审批。签名私钥只存放于 environment secret `BRIDGE_MANIFEST_SIGNING_KEY`，与 Codex 完全独立。
