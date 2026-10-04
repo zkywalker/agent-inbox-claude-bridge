@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.9 — 2026-10-04
+
+- After the owner explicitly resumes a paused queue, allow later queued input to continue when the native Claude session is `unknown`; the uncertain input is never replayed.
+- Requires the compatible gateway queue recovery fix. Native session identity and the existing signed release flow remain unchanged.
+
 ## 0.1.4 — 2026-09-26
 
 - Include a bounded, credential-redacted excerpt from the same successful native result in completed task records for device-authorized notification previews.

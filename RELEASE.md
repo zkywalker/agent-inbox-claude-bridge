@@ -1,5 +1,11 @@
 # 发布契约
 
+## Coding input recovery release 0.1.9
+
+This release permits an explicitly resumed durable queue to claim later messages after a native Claude result is `unknown`. It does not replay the uncertain input and continues to validate the native session before starting the next turn. Deploy the compatible gateway first; install only after confirming the target is idle and preserving its state.
+
+The release remains a signed three-platform package under the existing Claude Bridge trust root. SDK, native Claude version, permissions, concurrency and updater policy are unchanged.
+
 ## Coding input release 0.1.8
 
 Durable next-turn input queues preserve the native Claude session and stop consumption on uncertain outcomes. Claude advertises queue support only; native Skill selection is not advertised.

@@ -73,6 +73,15 @@
         "shared/protocol.ts": "15fb1a6d37837b64d8df936c2328de2bdd70181cfd8a162c9bba7a31645f03f4",
         "shared/runtime.ts": "9d515ddb74dd74393e65fc1c1fe430f78fc081bafed0aa7841d4f43ee48be4d0"
       }
+    },
+    {
+      "at": "2026-10-04",
+      "baseRelease": "v0.1.8",
+      "upstreamCommit": "c0dc954aec754d590eaa7872290fe85fa1bd6223",
+      "note": "Allow explicit queue recovery after an unknown native result without replaying the uncertain input.",
+      "files": {
+        "adapters/claude/bridge.ts": "9a28848b2ad66fcaec9d2098b9b08940b2b4e4e6c3a9eda229622d5ba3ea96cd"
+      }
     }
   ]
 }

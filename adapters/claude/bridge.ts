@@ -64,7 +64,10 @@ export class ClaudeBridge {
     return this.serializedInput(async () => {
     if (!this.management.ready || this.management.maintenance || this.active.has(conversationId) || this.active.size >= this.config.maxConcurrentTopics) return;
     const session = this.management.session(conversationId);
-    if (session && !['idle','failed','interrupted'].includes(session.state)) return;
+    // `unknown` is eligible only after the owner explicitly resumes the queue;
+    // the gateway keeps it paused until then, and the native session is still
+    // checked by acceptInput before any new turn is started.
+    if (session && !['idle','failed','interrupted','unknown'].includes(session.state)) return;
     const delivery = await this.gateway.claimQueued(conversationId, this.management.instanceId);
     if (delivery) await this.acceptInput(delivery);
     });
