@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, realpath, readFile, rm, stat, symlink, mkdir, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LocalHealth } from '../dist/adapters/claude/local-health.js';
-import { ClaudeBridge } from '../dist/adapters/claude/bridge.js';
-import { configSchema } from '../dist/adapters/claude/config.js';
-import { BridgeState } from '../dist/adapters/codex/state.js';
-import { GatewayError } from '../dist/adapters/codex/gateway.js';
+import { LocalHealth } from '../dist-tests/adapters/claude/local-health.js';
+import { ClaudeBridge } from '../dist-tests/adapters/claude/bridge.js';
+import { configSchema } from '../dist-tests/adapters/claude/config.js';
+import { BridgeState } from '../dist-tests/adapters/codex/state.js';
+import { GatewayError } from '../dist-tests/adapters/codex/gateway.js';
 
 async function fixture(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'inbox-health-')));
