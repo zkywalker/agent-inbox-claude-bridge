@@ -4,6 +4,10 @@ import { mkdtemp, realpath, readFile, rm, stat, symlink, mkdir, readdir } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalHealth } from '../dist/adapters/claude/local-health.js';
+import { ClaudeBridge } from '../dist/adapters/claude/bridge.js';
+import { configSchema } from '../dist/adapters/claude/config.js';
+import { BridgeState } from '../dist/adapters/codex/state.js';
+import { GatewayError } from '../dist/adapters/codex/gateway.js';
 
 async function fixture(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'inbox-health-')));
@@ -37,4 +41,44 @@ test('diagnostic writer does not follow a substituted directory link', async t =
   const health = new LocalHealth('claude', join(root, 'config.json'));
   await health.start(); health.success(); await health.stop();
   assert.deepEqual(await readdir(target), []);
+});
+
+async function bridgeFixture(t) {
+  const root = await fixture(t);
+  const state = new BridgeState(':memory:');
+  const config = configSchema.parse({ gatewayUrl: 'http://localhost', token: 'isolated-health-test-token', projectPath: root, stateDir: root });
+  const bridge = new ClaudeBridge(config, state);
+  bridge.management.run = async () => {};
+  bridge.flushOutgoing = async () => {};
+  bridge.gateway.call = async () => assert.fail('health must use the existing polling transport');
+  t.after(async () => { bridge.stop(); await bridge.management.close(); state.close(); });
+  return bridge;
+}
+
+test('local health follows recoverable polls and shutdown cancels authentication backoff', { timeout: 5000 }, async t => {
+  for (const status of [undefined, 401]) {
+    const bridge = await bridgeFixture(t);
+    const observed = [];
+    bridge.gateway.pollInbox = async options => {
+      assert.equal(options.claudeInstanceId, bridge.management.instanceId);
+      assert.ok(options.signal instanceof AbortSignal);
+      if (status) throw new GatewayError(status, 'isolated-private-reason');
+      return { protocolVersion: 1, deliveries: [] };
+    };
+    bridge.onLocalConnection = (...event) => { observed.push(event); bridge.stop(); };
+    await bridge.run();
+    assert.deepEqual(observed, status ? [[false, status]] : [[true]]);
+  }
+});
+
+test('a poll settling after shutdown cannot publish fresh connection evidence', { timeout: 5000 }, async t => {
+  const bridge = await bridgeFixture(t);
+  const observed = [];
+  bridge.onLocalConnection = (...event) => observed.push(event);
+  bridge.gateway.pollInbox = async () => {
+    bridge.stop();
+    return { protocolVersion: 1, deliveries: [] };
+  };
+  await bridge.run();
+  assert.deepEqual(observed, []);
 });

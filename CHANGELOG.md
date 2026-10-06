@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4 — 2026-09-26
+
+- Include a bounded, credential-redacted excerpt from the same successful native result in completed task records for device-authorized notification previews.
+- Missing result text, failed and interrupted turns do not borrow previous replies or claim a successful result.
+- Deploy the summary-aware gateway first. No permission, SDK, native version, concurrency or signing changes. Offline validation is distinct from real model and push acceptance.
+
 ## 0.1.3 — 2026-09-25
 
 - Publish explicit proactive contact and confirmed main-task endings through the existing durable outbox; preserve legacy custom-connector compatibility.

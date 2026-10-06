@@ -3,22 +3,22 @@
   "adaptations": [
     "shared/bridge-release.ts uses the independent Claude repository and signature domain; listed file hashes record the upstream export before that adaptation"
   ],
-  "baseCommit": "905f7c0bc8199192b7661c72e44d0b5bf4bd1386",
-  "note": "Approved working-tree export: stable task/heartbeat identities and types, explicit proactive contact and confirmed main-task terminal outbox records. Gateway must deploy first. No concurrency, permission, SDK, native version or signing policy changes. Per-file hashes identify uncommitted upstream source.",
+  "baseCommit": "32c08c6e5f522e657725dd434403dbb3732092b5",
+  "note": "Realtime transport integration: recoverable message polling, independent controls, dirty reports, durable outgoing error isolation and bounded retries. Existing signing identity and native execution behavior retained.",
   "files": {
-    "adapters/claude/bridge.ts": "dca8e339ca69ec96b84f79bb19508c218ba1001d1dcce185b32661b0a6097de0",
+    "adapters/claude/bridge.ts": "6a46e2d1b0be323f6fc00e528d31e9b8734f82eb5ea02cef21fdfeb42d3740dc",
     "adapters/claude/config.ts": "c4b321bffc8e34eccfeacad9cd05e6dfc6e1351e1b807319cf3c289531e8fdac",
     "adapters/claude/codex-provider.ts": "5e30f9fbdc434f79e93342daadfcb445a3c247793018d333c0dc5f5e2aca664a",
     "adapters/claude/main.ts": "a5421390db918aa1e98054f5b3035e2a58b8c1283144c980cc155b1bcec82a81",
-    "adapters/claude/management.ts": "17faa8db5e5c491ac07b8153339a37ffeb7658d62c917850d7c6ad6751d3581a",
+    "adapters/claude/management.ts": "16cbe84d9cb9fc29fce855de50a4ad2205b88a4edeb8d433d30338775012614b",
     "adapters/claude/messages-proxy.ts": "c687c64e76a9489d8b73bf3bbfbd8f79af1394debf9d977193867ff91777d621",
     "adapters/claude/runtime.ts": "3a87c5c06a15d1ddfbed52b292ab55fadc2715e34debe399439a7b7be656a251",
-    "adapters/codex/gateway.ts": "c389549941344716db16261460c24c29a79aaa767ab9be076b10259097d42ee2",
-    "adapters/codex/state.ts": "a9cf823ad8711722d4d2cef759475871c9b4d990f57066c861c2f9e17c4e14ef",
+    "adapters/codex/gateway.ts": "eb9b28d5842037b37560feeed16151069c39dcfcda42c6ce23d997adf5d63c93",
+    "adapters/codex/state.ts": "882263af6ebb16afc139cb7f57284f8473a08cc076959fca014c76bf00a6318e",
     "adapters/codex/projects.ts": "f7d31c099508a4a3846dd60688bd9bc0876a4b1d8ae22f1729d5b5b8333db9c7",
     "adapters/codex/files.ts": "24289d57501243f5ae1506021bfbf86fc8b421a85a1e001ddc1574d3a6986e76",
     "adapters/codex/file-references.ts": "a935feff07a13360732df5ceba48478f0b02fbb2fdfbebb135c02877b6833700",
-    "shared/protocol.ts": "495528dda6c4e3ed050e7bb4f361dfe113d16458f2af0bc4347360bd016a92b9",
+    "shared/protocol.ts": "fb387f8b9963562b9fc48473d0f1d4981d1b2e782f1223f8a27c431877ac19c1",
     "shared/runtime.ts": "2d4d99c26ed5afddb2b0f73efab267fde2021861246e1ecbca44a8d55a8a72cc",
     "shared/codex.ts": "7c26cda432600362f90650ba198a2175d80c7cae78734231202876e637226daf",
     "shared/codex-settings.ts": "693929cd5c1a1112fca62fc2d07df1d5c34ea00d81392846685afd0802a73c05",
@@ -26,6 +26,11 @@
     "shared/bridge-update.ts": "c2474a4faa6455ff707a8b3ab868bdf27905708dd28bac2ac1ac87eadacc812e",
     "shared/bridge-release.ts": "ba6a5b8d8cb062aa51fe57358f419850495ab101a6c4ffd4ada7f1d34ca786e6",
     "adapters/claude/activity.ts": "04e356df1fb158695486ad57b8a894058999581c6aefe0211b6a7f782899c5b8",
-    "shared/runtime-activity.ts": "20eb541e778f2b86c28baf29358aa760eba0ffe6345eee73f523cd147ff0162b"
+    "shared/runtime-activity.ts": "20eb541e778f2b86c28baf29358aa760eba0ffe6345eee73f523cd147ff0162b",
+    "adapters/codex/outgoing.ts": "0307232b0ddabf5656c5e0b614c479eea3058a1de6da981912816968b64d9598",
+    "adapters/codex/host-safety.ts": "8d2398594b425daf0af9c006509e3ef54db36a30d31e6d0ffef5a13e15501247",
+    "shared/stickers.ts": "a8d64ec9b1d384aec9a0cf036457d60ce7cb8b5145a460a6dd413ad05650e383",
+    "tests/connector-transport.test.ts": "b703cd8eab606eae7be156e4d98bf0d66e21850c27d50578250a29ce855b7b27",
+    "tests/codex-delivery-poll.test.ts": "0d9caa3efdc9250fb4f1be95136c17600c389b8ecb7dcdd4177160e6a40c07a0"
   }
 }

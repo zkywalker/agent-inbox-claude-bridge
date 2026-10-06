@@ -4,10 +4,11 @@ import { cp, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'no
 import { join, relative, isAbsolute, sep } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { ClaudeSelection, ClaudeSettings, CodexUpdateInfo, RuntimeReport, RuntimeRequest } from '../../shared/runtime.js';
 import type { CodexAction, CodexSession } from '../../shared/codex.js';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { Gateway } from '../codex/gateway.js';
+import { Gateway, GatewayError } from '../codex/gateway.js';
 import { BridgeState, stableKey, type Session } from '../codex/state.js';
 import { Projects } from '../codex/projects.js';
 import { OnlineFiles } from '../codex/files.js';
@@ -33,6 +34,15 @@ export class ClaudeManagement {
   ready = false;
   version = 'unknown';
   private stopped = false;
+  private readonly abort = new AbortController();
+  private registered = false;
+  private registration?: Promise<void>;
+  private lastRegisteredAt = 0;
+  private lastConfiguredAt = 0;
+  private lastHeartbeatAt = 0;
+  private authenticationRetryAt = 0;
+  private readonly publishing = new Map<string, Promise<void>>();
+  private readonly sessionRetryAt = new Map<string, number>();
   private pendingOperation?: Promise<void>;
   private revision = -1;
   private credentialsReady = false;
@@ -47,6 +57,7 @@ export class ClaudeManagement {
     this.update = state.tool('claude:update') ?? { supported: !!config.allowNativeUpdate, reason: config.allowNativeUpdate ? null : 'disabled', status: 'idle', operationId: null, fromVersion: null, toVersion: null, error: null, updatedAt: new Date().toISOString() };
     if (['updating', 'restarting', 'verifying'].includes(this.update.status)) this.saveUpdate({ ...this.update, status: 'uncertain', error: 'update_interrupted' });
     this.maintenance = this.update.status === 'uncertain';
+    this.state.invalidateSessionReports();
   }
   private saveUpdate(update: CodexUpdateInfo) { this.update = { ...update, updatedAt: new Date().toISOString() }; this.state.saveTool('claude:update', this.update); }
   private localConnection() {
@@ -75,12 +86,17 @@ export class ClaudeManagement {
       if (this.projectConfig.projects.some(project => project.id === session.projectId)) await this.publishSession(session);
     }
     if (this.config.managementToken) await this.gateway.call('/connector/runtime/report', this.report(null), true);
+    this.lastHeartbeatAt = Date.now();
     this.ready = true;
   }
   private async register() {
-    await this.gateway.call('/connector/coding/connect', { instanceId: this.instanceId, version: this.version, account: this.connections.length ? 'apiKey' : 'unknown', projects: this.projectConfig.projects.map(project => ({ ...project, host: hostname() })) }, true);
+    if (this.registration) return this.registration;
+    this.registration = this.gateway.call('/connector/coding/connect', { instanceId: this.instanceId, version: this.version, account: this.connections.length ? 'apiKey' : 'unknown', projects: this.projectConfig.projects.map(project => ({ ...project, host: hostname() })) }, true).then(() => {
+      this.registered = true; this.lastRegisteredAt = Date.now();
+    }).finally(() => { this.registration = undefined; });
+    return this.registration;
   }
-  session(conversationId: string) { return this.state.sessions().find(session => session.conversationId === conversationId); }
+  session(conversationId: string) { return this.state.session(conversationId); }
   project(session?: Pick<Session, 'projectId'>) {
     const project = this.projectConfig.projects.find(project => project.id === (session?.projectId ?? this.projectConfig.projects[0].id));
     if (!project) throw new Error('Project no longer configured');
@@ -128,8 +144,7 @@ export class ClaudeManagement {
     return { model: selected.model ?? null, provider: selected.connection?.id ?? 'native', nativeSettings };
   }
   private busy(conversationId?: string) {
-    const sessions = conversationId ? [this.session(conversationId)].filter((session): session is Session => !!session) : this.state.sessions();
-    return this.host.busy(conversationId) || sessions.some(session => ['running', 'waiting', 'unknown'].includes(session.state));
+    return this.host.busy(conversationId) || (conversationId ? ['running', 'waiting', 'unknown'].includes(this.session(conversationId)?.state ?? '') : this.state.hasUnfinishedSessions());
   }
   private saveDefaults(model: { model: string; provider: string }, settings: ClaudeSettings) {
     this.state.db.exec('BEGIN IMMEDIATE');
@@ -199,9 +214,22 @@ export class ClaudeManagement {
   }
   async publishSession(session: Session) {
     if (!this.config.managementToken) return;
-    const snapshot: CodexSession = { conversationId: session.conversationId, projectId: session.projectId, threadId: session.threadId, turnId: session.turnId, state: session.state, model: session.model, error: session.error, environment: this.report(session.conversationId).environment };
-    await this.gateway.call('/connector/coding/session', { instanceId: this.instanceId, session: snapshot }, true);
-    await this.gateway.call('/connector/runtime/report', this.report(session.conversationId), true);
+    const id = session.conversationId;
+    const pending = (this.publishing.get(id) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      session = this.session(id) ?? session;
+      const revision = this.state.sessionRevision(id), previous = this.state.sessionReport(id);
+      if (previous && Number(previous.sent_revision) === revision) return;
+      const report = this.report(id);
+      const snapshot: CodexSession = { conversationId: id, projectId: session.projectId, threadId: session.threadId, turnId: session.turnId, state: session.state, model: session.model, error: session.error, environment: report.environment };
+      await this.gateway.call('/connector/coding/session', { instanceId: this.instanceId, session: snapshot }, true);
+      await this.gateway.call('/connector/runtime/report', report, true);
+      this.state.reportedSession(id, revision, Date.now());
+      this.sessionRetryAt.delete(id);
+    });
+    this.publishing.set(id, pending);
+    try { await pending; }
+    catch (error) { this.sessionRetryAt.set(id, Date.now() + 10_000); this.state.postponeSessionReport(id, Date.now()); throw error; }
+    finally { if (this.publishing.get(id) === pending) this.publishing.delete(id); }
   }
   private async scanSkills() {
     const skills: typeof this.skills = [];
@@ -241,6 +269,7 @@ export class ClaudeManagement {
   async syncConnections() {
     if (this.host.busy() || (this.ready && this.busy()) || this.maintenance || this.pendingOperation) return;
     const desired = await this.gateway.call('/connector/runtime/connections?after=' + this.revision, undefined, true);
+    this.lastConfiguredAt = Date.now();
     // The network wait may have admitted a turn or another maintenance owner.
     if (this.host.busy() || (this.ready && this.busy()) || this.maintenance || this.pendingOperation) return;
     if (desired.connections === null) { this.credentialsReady = true; return; }
@@ -251,6 +280,7 @@ export class ClaudeManagement {
       const next = [...this.localConnection(), ...connections];
       await this.configureConnections(next);
       this.connections = next; this.revision = desired.revision; this.credentialsReady = true;
+      this.state.invalidateSessionReports(); this.lastHeartbeatAt = 0;
       await this.gateway.call('/connector/runtime/connections/ack', { revision: this.revision, ok: true }, true);
     } catch {
       this.credentialsReady = false;
@@ -327,6 +357,8 @@ export class ClaudeManagement {
         } catch { this.saveUpdate({ ...this.update, status: 'uncertain', error: 'update_interrupted' }); throw new Error('update_interrupted'); }
       } else if (request.kind !== 'inspect') throw new Error('unsupported');
       releaseMaintenance();
+      if (['set-skill', 'set-mcp', 'reload-mcp', 'update-claude'].includes(request.kind)) this.state.invalidateSessionReports();
+      this.lastHeartbeatAt = 0;
       const outcome = { ok: true, result, report: this.report(request.conversationId) };
       this.state.saveTool(`claude:operation:${request.id}`, outcome);
       await this.gateway.call(`/connector/runtime/requests/${request.id}/result`, outcome, true);
@@ -340,11 +372,30 @@ export class ClaudeManagement {
   }
   async run() {
     if (!this.config.managementToken) return;
+    await Promise.all([this.controlLoop(), this.runtimeLoop(), this.maintenanceLoop(), this.heartbeatLoop(), this.reportLoop()]);
+  }
+  private async wait(ms: number) { await delay(ms, undefined, { signal: this.abort.signal }).catch(() => {}); }
+  private async waitForAuthentication() {
+    const remaining = this.authenticationRetryAt - Date.now();
+    if (remaining > 0) await this.wait(remaining);
+  }
+  private retryDelay(error: unknown) {
+    this.ready = false;
+    if (error instanceof GatewayError && error.status === 409 && error.code === 'reconnect') {
+      this.registered = false; this.state.invalidateSessionReports(); this.lastHeartbeatAt = 0;
+    }
+    if (error instanceof GatewayError && [401, 403].includes(error.status)) {
+      this.authenticationRetryAt = Date.now() + 60_000; return 60_000;
+    }
+    return 2000;
+  }
+  private async controlLoop() {
     while (!this.stopped) {
+      await this.waitForAuthentication(); if (this.stopped) break;
       try {
-        await this.syncConnections();
-        await this.register();
-        const controls = await this.gateway.call('/connector/coding/inbox?instanceId=' + this.instanceId, undefined, true);
+        if (!this.registered) await this.register();
+        const controls = await this.gateway.call('/connector/coding/inbox?instanceId=' + this.instanceId + '&wait=20', undefined, true, undefined, this.abort.signal);
+        if (this.stopped) break;
         for (const action of controls.actions as CodexAction[]) {
           const key = `claude:control:${action.id}`, prior = this.state.tool(key);
           let outcome = prior === 'processing' ? { ok: false, error: '操作结果不确定，未重放。' } : prior;
@@ -355,19 +406,64 @@ export class ClaudeManagement {
           }
           await this.gateway.call(`/connector/coding/actions/${action.id}/result`, { ...outcome, instanceId: this.instanceId }, true);
         }
-        if (!this.pendingOperation) {
-          const inbox = await this.gateway.call('/connector/runtime/inbox?wait=0&instanceId=' + this.instanceId, undefined, true);
+        // Older gateways may ignore wait; avoid turning compatibility into a busy loop.
+        if (!controls.actions.length) await this.wait(1000);
+      } catch (error) { if (!this.stopped) await this.wait(this.retryDelay(error)); }
+    }
+  }
+  private async runtimeLoop() {
+    while (!this.stopped) {
+      await this.waitForAuthentication(); if (this.stopped) break;
+      try {
+        if (!this.registered) { await this.wait(1000); continue; }
+        const inbox = await this.gateway.call('/connector/runtime/inbox?wait=20&instanceId=' + this.instanceId, undefined, true, undefined, this.abort.signal);
+        if (this.stopped) break;
+        if (inbox.requests.length) {
           this.pendingOperation = (async () => {
             for (const request of inbox.requests as RuntimeRequest[]) await this.operation(request);
           })().catch(() => { this.ready = false; }).finally(() => { this.pendingOperation = undefined; });
+          await this.pendingOperation;
         }
-        for (const session of this.state.sessions()) if (this.projectConfig.projects.some(project => project.id === session.projectId)) await this.publishSession(session);
-        await this.gateway.call('/connector/runtime/report', this.report(null), true);
-        this.ready = this.credentialsReady;
-      } catch { this.ready = false; }
-      await new Promise(resolve => setTimeout(resolve, 1000));
+        if (!inbox.requests.length) await this.wait(1000);
+      } catch (error) { if (!this.stopped) await this.wait(this.retryDelay(error)); }
     }
   }
-  stop() { this.stopped = true; this.ready = false; this.files.stop(); }
+  private async maintenanceLoop() {
+    while (!this.stopped) {
+      await this.waitForAuthentication(); if (this.stopped) break;
+      try {
+        if (!this.registered || Date.now() - this.lastRegisteredAt >= 30_000) await this.register();
+        if (Date.now() - this.lastConfiguredAt >= 30_000) await this.syncConnections();
+        await this.wait(1000);
+      } catch (error) { if (!this.stopped) await this.wait(this.retryDelay(error)); }
+    }
+  }
+  private async reportLoop() {
+    while (!this.stopped) {
+      await this.waitForAuthentication(); if (this.stopped) break;
+      try {
+        if (!this.registered) { await this.wait(1000); continue; }
+        for (const session of this.state.dirtySessions()) {
+          if (this.stopped || this.authenticationRetryAt > Date.now()) break;
+          if ((this.sessionRetryAt.get(session.conversationId) ?? 0) > Date.now() || !this.projectConfig.projects.some(project => project.id === session.projectId)) continue;
+          await this.publishSession(session).catch(error => { this.retryDelay(error); });
+        }
+        await this.wait(1000);
+      } catch (error) { if (!this.stopped) await this.wait(this.retryDelay(error)); }
+    }
+  }
+  private async heartbeatLoop() {
+    while (!this.stopped) {
+      await this.waitForAuthentication(); if (this.stopped) break;
+      try {
+        if (this.registered && Date.now() - this.lastHeartbeatAt >= 10_000) {
+          await this.gateway.call('/connector/runtime/report', this.report(null), true);
+          this.lastHeartbeatAt = Date.now(); this.ready = this.credentialsReady && this.authenticationRetryAt <= Date.now();
+        }
+        await this.wait(1000);
+      } catch (error) { if (!this.stopped) await this.wait(this.retryDelay(error)); }
+    }
+  }
+  stop() { this.stopped = true; this.abort.abort(); this.ready = false; this.files.stop(); }
   async close() { this.stop(); await this.proxy.close(); await this.pendingOperation; }
 }

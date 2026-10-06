@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { setTimeout as transportDelay } from 'node:timers/promises';
 import { createSdkMcpServer, query, tool, type Options, type PermissionResult, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { Gateway, GatewayError } from '../codex/gateway.js';
 import { BridgeState, type Outgoing, type Session } from '../codex/state.js';
-import type { Delivery, Message } from '../../shared/protocol.js';
+import type { Delivery } from '../../shared/protocol.js';
+import { OutgoingTransport } from '../codex/outgoing.js';
 import type { CodexAction, CodexQuestion } from '../../shared/codex.js';
 import { providerEnvironment, type ClaudeConfig } from './config.js';
 import { ClaudeManagement } from './management.js';
@@ -18,14 +20,17 @@ const instruction = 'You are connected through Agent Inbox. Respond in the conve
 export class ClaudeBridge {
   onLocalConnection?: (connected: boolean, status?: number) => void;
   readonly gateway: Gateway;
+  private readonly outgoing: OutgoingTransport;
   readonly active = new Map<string, Active>();
   readonly approvals = new Map<string, Approval>();
   readonly management: ClaudeManagement;
   private initialized = false;
   private stopped = false;
+  private transportAbort = new AbortController();
   constructor(readonly config: ClaudeConfig, readonly state: BridgeState, readonly runner: Runner = query) {
     providerEnvironment(config);
     this.gateway = new Gateway({ ...config, projects: config.projects?.length ? config.projects : [{ id: 'default', name: 'Claude project', path: config.projectPath }] });
+    this.outgoing = new OutgoingTransport(state, this.gateway);
     state.db.exec('CREATE TABLE IF NOT EXISTS claude_sessions (conversation_id TEXT PRIMARY KEY, session_id TEXT NOT NULL); CREATE TABLE IF NOT EXISTS claude_identity (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
     this.bindIdentity('project', config.projectPath);
     this.bindIdentity('gateway', this.gateway.base.origin);
@@ -92,7 +97,11 @@ export class ClaudeBridge {
     const active: Active = { abort: new AbortController(), task: Promise.resolve() };
     this.active.set(conversationId, active);
     this.state.markInput(inputId, 'processing');
-    active.task = this.execute(delivery, active).finally(() => this.active.delete(conversationId));
+    active.task = this.execute(delivery, active).finally(() => {
+      this.active.delete(conversationId);
+      // The final runtime report must observe that this host task is no longer busy.
+      this.state.markSessionDirty(conversationId);
+    });
   }
   private async control(action: CodexAction) {
     const session = this.management.session(action.conversationId);
@@ -179,7 +188,7 @@ export class ClaudeBridge {
   private async execute(delivery: Delivery, active: Active) {
     const conversationId = delivery.conversation.id, inputId = delivery.message.id;
     const startedAt = new Date().toISOString();
-    let accepted = false, completed = false, streamed = '';
+    let accepted = false, completed = false, streamed = '', finalText = '';
     let messageId: string = randomUUID();
     let session: Session | undefined;
     const activity = new ClaudeActivity((runtimeActivity, text) => {
@@ -237,6 +246,7 @@ export class ClaudeBridge {
         }
         if (event.type === 'result') {
           completed = true;
+          if (!event.is_error && 'result' in event && typeof event.result === 'string') finalText = event.result;
           session.state = event.is_error ? 'failed' : active.abort.signal.aborted ? 'interrupted' : 'idle';
           if (event.usage) session.usage = { contextTokens: null, contextLimit: null, inputTokens: event.usage.input_tokens, outputTokens: event.usage.output_tokens, cacheReadTokens: event.usage.cache_read_input_tokens ?? null, contextSource: 'unknown', totalsSource: 'runtime' };
           this.state.save(session);
@@ -259,38 +269,30 @@ export class ClaudeBridge {
       if (this.config.managementToken && session && ['idle', 'failed', 'interrupted'].includes(session.state)) {
         const state = session.state === 'idle' ? 'completed' : session.state === 'failed' ? 'failed' : 'interrupted';
         this.state.put({ conversationId, key: `${inputId}:terminal`, text: state === 'completed' ? '本次任务已完成。' : state === 'failed' ? '本次任务异常结束。' : '本次任务已停止。', kind: 'activity', streaming: false,
-          process: { id: createHash('sha256').update(inputId).digest('hex'), state, startedAt, completedAt: new Date().toISOString() } });
+          process: { id: createHash('sha256').update(inputId).digest('hex'), state, startedAt, completedAt: new Date().toISOString(), ...(state === 'completed' && finalText ? { summary: this.redactProgress(finalText).slice(0, 2000) } : {}) } });
       }
       if (session) { session.turnId = null; this.state.save(session); await this.management.publishSession(session).catch(() => {}); }
     }
   }
   async flushOutgoing() {
-    for (const row of this.state.dirty()) {
-      const message: Outgoing = JSON.parse(row.body as string);
-      let id = row.message_id as string | null;
-      if (!id) {
-        const created: Message = await this.gateway.call(`/connector/conversations/${message.conversationId}/messages`, { ...message, key: undefined, conversationId: undefined, clientMessageId: row.key });
-        id = created.id;
-      }
-      await this.gateway.call(`/connector/messages/${id}`, { text: message.text, streaming: message.streaming, ...(message.runtimeActivity ? { runtimeActivity: message.runtimeActivity } : {}) }, false, 'PATCH');
-      this.state.sent(row.key as string, id, Number(row.revision));
-    }
+    return this.outgoing.flush();
   }
-  stop() { this.stopped = true; this.management.stop(); for (const active of this.active.values()) { active.abort.abort(); active.query?.close(); } }
+  stop() { this.stopped = true; this.transportAbort.abort(); this.management.stop(); for (const active of this.active.values()) { active.abort.abort(); active.query?.close(); } }
   async run() {
     const outgoing = async () => { while (!this.stopped) { await this.flushOutgoing().catch(() => {}); await pause(500); } };
     const polling = async () => {
+      let failures = 0;
       while (!this.stopped) {
         try {
-          const inbox = await this.gateway.call<{ deliveries: Delivery[]; protocolVersion: number }>(`/connector/inbox?wait=20&claudeInstanceId=${this.management.instanceId}`);
-          if (inbox.protocolVersion !== 1) throw new Error('Protocol mismatch');
+          const inbox = await this.gateway.pollInbox({ claudeInstanceId: this.management.instanceId, signal: this.transportAbort.signal });
+          failures = 0;
           if (!this.stopped) this.onLocalConnection?.(true);
           for (const delivery of inbox.deliveries) { if (this.stopped) break; await this.accept(delivery); }
         } catch (error) {
-          if (!this.stopped) {
-            this.onLocalConnection?.(false, error instanceof GatewayError ? error.status : undefined);
-            await pause(2000);
-          }
+          if (this.stopped) break;
+          this.onLocalConnection?.(false, error instanceof GatewayError ? error.status : undefined);
+          const retry = error instanceof GatewayError && [401, 403].includes(error.status) ? 60_000 : Math.min(30_000, 2000 * 2 ** Math.min(failures++, 4));
+          await transportDelay(retry, undefined, { signal: this.transportAbort.signal }).catch(() => {});
         }
       }
     };

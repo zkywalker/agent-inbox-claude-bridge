@@ -1,7 +1,8 @@
 import type { CodexSelection } from './codex-settings.js';
 import type { ClaudeSelection } from './runtime.js';
+import type { StickerMessageContent } from './stickers.js';
 export const PROTOCOL_VERSION = 1;
-export type AgentKind = "hermes" | "openclaw" | "nanobot" | "codex" | "claude" | "custom";
+export type AgentKind = "hermes" | "openclaw" | "nanobot" | "codex" | "claude" | "custom" | "chatbot";
 export const isCodingAgent = (kind: AgentKind | undefined) => kind === 'codex' || kind === 'claude';
 export const avatarPresets = ["codex", "claude", "hermes", "openclaw", "nanobot", "inbox", "sparkles", "orbit", "leaf"] as const;
 export type AvatarPreset = typeof avatarPresets[number];
@@ -74,15 +75,19 @@ export interface MessageProcess {
   state: "running" | "waiting" | "completed" | "failed" | "interrupted" | "unknown";
   startedAt: string;
   completedAt?: string;
+  summary?: string;
 }
 export interface Message {
   id: string;
+  /** Durable entity revision; creation sequence remains independent. */
+  revision?: number;
   conversationId: string;
   role: "user" | "agent";
   kind: MessageKind;
   label: string | null;
   text: string;
   attachments: Attachment[];
+  sticker?: StickerMessageContent;
   status: DeliveryStatus;
   error: string | null;
   createdAt: string;
@@ -104,11 +109,31 @@ export interface Snapshot {
   conversations: Conversation[];
   revision: number;
   webVersion?: string;
+  cursor?: string;
+}
+export interface SyncChanges {
+  cursor: string;
+  hasMore: boolean;
+  agents: Agent[];
+  conversations: Conversation[];
+  messages: Message[];
+  removed: { agents: string[]; conversations: string[]; messages: string[] };
+  invalidations: { agentIds: string[]; conversationIds: string[]; all: boolean };
+  webVersion?: string;
 }
 export interface Identity {
   id: string;
   name: string;
   authMode: "development" | "access";
+}
+export interface LoginSession {
+  id: string;
+  name: string;
+  platform: string;
+  current: boolean;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
 }
 export interface ApiError {
   error: string;
