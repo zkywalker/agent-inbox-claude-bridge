@@ -5,6 +5,7 @@ import { configSchema, providerEnvironment } from './config.js';
 import { ClaudeBridge } from './bridge.js';
 import { resolveClaudeBinary, verifyClaudeBinary } from './runtime.js';
 import { resolveCodexProvider } from './codex-provider.js';
+import { LocalHealth } from './local-health.js';
 
 async function main() {
   const validate = process.argv[2] === '--validate';
@@ -25,11 +26,14 @@ async function main() {
   const lock = await open(lockPath, 'wx', 0o600);
   let state: BridgeState | undefined;
   let bridge: ClaudeBridge | undefined;
+  const health = new LocalHealth('claude', path);
   try {
     await lock.writeFile(String(process.pid));
+    await health.start();
     state = new BridgeState(join(config.stateDir, 'claude.sqlite'));
     await chmod(join(config.stateDir, 'claude.sqlite'), 0o600);
     bridge = new ClaudeBridge(config, state);
+    bridge.onLocalConnection = (connected, status) => connected ? health.success() : health.failure(status);
     const profile = await bridge.gateway.call('/connector/profile');
     if (profile.kind !== 'claude' && !(profile.kind === 'custom' && !config.managementToken)) throw new Error('Create a separate Claude contact; legacy custom contacts support messages only');
     bridge.bindIdentity('agent', profile.id);
@@ -37,6 +41,6 @@ async function main() {
     console.log(`Claude bridge ready (${version}); native inference requires a working provider.`);
     process.once('SIGINT', () => bridge?.stop()); process.once('SIGTERM', () => bridge?.stop());
     try { await bridge.run(); } finally { bridge.stop(); }
-  } finally { bridge?.stop(); await bridge?.management.close(); state?.close(); await lock.close(); await unlink(lockPath); }
+  } finally { bridge?.stop(); await health.stop(); await bridge?.management.close(); state?.close(); await lock.close(); await unlink(lockPath); }
 }
 main().catch(() => { console.error('Claude bridge startup failed. Check private config permissions, installed Claude binary, state lock, provider environment and gateway authentication.'); process.exitCode = 1; });
